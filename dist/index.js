@@ -11,10 +11,15 @@ const llm_1 = require("./llm");
 const impact_1 = require("./impact");
 function loadTasksModule() {
     try {
-        return require('../../an5Tasks/dist/index');
+        return require('an5-tasks');
     }
     catch {
-        return null;
+        try {
+            return require('../../an5Tasks/dist/index');
+        }
+        catch {
+            return null;
+        }
     }
 }
 function git(args, allowFail = false) {

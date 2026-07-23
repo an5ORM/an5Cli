@@ -9,9 +9,13 @@ import { analyzeImpact, analyzeDocUpdates, executeSync } from './impact';
 
 function loadTasksModule() {
   try {
-    return require('../../an5Tasks/dist/index');
+    return require('an5-tasks');
   } catch {
-    return null;
+    try {
+      return require('../../an5Tasks/dist/index');
+    } catch {
+      return null;
+    }
   }
 }
 

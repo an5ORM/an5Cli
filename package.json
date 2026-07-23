@@ -12,6 +12,7 @@
     "test": "node test/smoke.test.js"
   },
   "dependencies": {
+    "an5-tasks": "file:../an5Tasks"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",

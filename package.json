@@ -2,8 +2,17 @@
   "name": "an5-cli",
   "version": "0.1.0",
   "description": "Shared CLI for changelog generation, release automation, and component-based commits.",
+  "license": "MIT",
   "bin": {
     "an5-cli": "./dist/index.js"
+  },
+  "files": [
+    "dist/**/*.{js,d.ts}",
+    "ui/dist/**/*",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && npm run build --prefix ui",
@@ -12,7 +21,7 @@
     "test": "node test/smoke.test.js"
   },
   "dependencies": {
-    "an5-tasks": "file:../an5Tasks"
+    "an5-tasks": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",

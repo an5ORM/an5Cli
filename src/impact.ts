@@ -2,7 +2,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFileSync, execSync } from 'child_process';
+import { execFileSync } from 'child_process';
+import { runNpm } from './command';
 
 // ─── Dependency Graph ──────────────────────────────────────────────
 // Maps each repo to the repos it EXPORTS to (downstream consumers).
@@ -302,19 +303,19 @@ export async function executeSync(
 
         if (scripts.build) {
           console.log(`    ↳ npm run build...`);
-          execSync('npm run build', { cwd: repoPath, stdio: 'pipe' });
+          await runNpm(['run', 'build'], repoPath);
           console.log(`    ✓ Build passed`);
           results.push({ repo: repoName, step: 'build', success: true, output: 'Build passed' });
         }
 
         if (scripts.test) {
           console.log(`    ↳ npm test...`);
-          execSync('npm test', { cwd: repoPath, stdio: 'pipe' });
+          await runNpm(['test'], repoPath);
           console.log(`    ✓ Tests passed`);
           results.push({ repo: repoName, step: 'test', success: true, output: 'Tests passed' });
         }
       } catch (err: any) {
-        const output = err.stdout?.toString() || err.message;
+        const output = err.stdout || err.stderr || err.message;
         console.error(`    ❌ Failed: ${output.slice(0, 200)}`);
         results.push({ repo: repoName, step: 'build/test', success: false, output });
       }

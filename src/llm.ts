@@ -204,9 +204,11 @@ export async function generateCommitMessage(diff: string, repoName: string): Pro
 }
 
 export function getGitDiff(cwd: string, staged = true): string {
-  const { execSync } = require('child_process');
+  const { execFileSync } = require('child_process');
   try {
-    const diff = execSync(`git -C "${cwd}" diff${staged ? ' --cached' : ''}`, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+    const args = ['-C', cwd, 'diff'];
+    if (staged) args.push('--cached');
+    const diff = execFileSync('git', args, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
     return diff.trim();
   } catch {
     return '';
@@ -214,9 +216,10 @@ export function getGitDiff(cwd: string, staged = true): string {
 }
 
 export function getGitLog(cwd: string, count = 5): string {
-  const { execSync } = require('child_process');
+  const { execFileSync } = require('child_process');
   try {
-    return execSync(`git -C "${cwd}" log --oneline -${count}`, { encoding: 'utf8' }).trim();
+    const safeCount = Number.isFinite(count) && count > 0 ? Math.floor(count) : 5;
+    return execFileSync('git', ['-C', cwd, 'log', '--oneline', `-${safeCount}`], { encoding: 'utf8' }).trim();
   } catch {
     return '';
   }

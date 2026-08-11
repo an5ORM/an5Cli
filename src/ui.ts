@@ -3,9 +3,10 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { exec, execSync, execFileSync } from 'child_process';
+import { exec, execSync, execFileSync, spawn } from 'child_process';
 import { generateCommitMessage, generateCodeReview } from './llm';
 import { analyzeImpact, analyzeDocUpdates, executeSync } from './impact';
+import { runCommand, runNpm } from './command';
 
 function loadTasksModule() {
   try {
@@ -220,7 +221,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
     if (req.method === 'POST' && pathname === '/api/pull') {
       let body = '';
       req.on('data', chunk => body += chunk);
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const { repo: repoName } = JSON.parse(body);
           const repos = getRepositories(workspaceDir);
@@ -237,11 +238,11 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
           try {
             const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], repo.path) || 'main';
             logs += `↳ Pulling latest from origin/${branch}...\n`;
-            const out = execSync(`git pull origin ${branch}`, { cwd: repo.path, stdio: 'pipe' }).toString();
+            const out = (await runCommand('git', ['pull', 'origin', branch], repo.path)).output;
             logs += out + `✓ Pull complete\n`;
           } catch (err: any) {
             success = false;
-            logs += `❌ Git pull failed:\n` + (err.stdout?.toString() || err.message) + '\n';
+            logs += `❌ Git pull failed:\n` + (err.stdout || err.stderr || err.message) + '\n';
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -258,7 +259,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
     if (req.method === 'POST' && pathname === '/api/checks') {
       let body = '';
       req.on('data', chunk => body += chunk);
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const { repo: repoName, noVerify } = JSON.parse(body);
           const repos = getRepositories(workspaceDir);
@@ -290,25 +291,25 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             try {
               if (scripts.build) {
                 logs += `↳ Running build: npm run build...\n`;
-                const out = execSync('npm run build', { cwd: repo.path, stdio: 'pipe' }).toString();
+                const out = await runNpm(['run', 'build'], repo.path);
                 logs += out + `✓ Build passed\n\n`;
               }
 
               if (scripts.compile) {
                 logs += `↳ Running compilation: npm run compile...\n`;
-                const out = execSync('npm run compile', { cwd: repo.path, stdio: 'pipe' }).toString();
+                const out = await runNpm(['run', 'compile'], repo.path);
                 logs += out + `✓ Compile passed\n\n`;
               }
 
               const hasTestScript = scripts.test && scripts.test !== 'echo "Error: no test specified" && exit 1';
               if (hasTestScript) {
                 logs += `↳ Running tests: npm test...\n`;
-                const out = execSync('npm test', { cwd: repo.path, stdio: 'pipe' }).toString();
+                const out = await runNpm(['test'], repo.path);
                 logs += out + `✓ Tests passed\n\n`;
               }
             } catch (err: any) {
               success = false;
-              logs += `❌ Command failed:\n` + (err.stdout?.toString() || err.message) + '\n';
+              logs += `❌ Command failed:\n` + (err.stdout || err.stderr || err.message) + '\n';
             } finally {
               delete process.env.AN5_CLI_CHECKS_RUNNING;
             }
@@ -405,7 +406,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
     if (req.method === 'POST' && pathname === '/api/release') {
       let body = '';
       req.on('data', chunk => body += chunk);
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const { repo: repoName, message, push, noVerify } = JSON.parse(body);
           const repos = getRepositories(workspaceDir);
@@ -417,28 +418,22 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             return;
           }
 
-          // Build CLI command string. If the repo is the parent workspace itself, path is E:/git/an5
           const isParent = repo.path === workspaceDir;
-          const cmdArgs = [
-            `"${cliPath}"`,
-            isParent ? 'release' : `release "${repo.path}"`,
-            `--message "${message.replace(/"/g, '\\"')}"`,
-            '--skip-prompt'
-          ];
-          if (push) cmdArgs.push('--push');
-          if (noVerify) cmdArgs.push('--no-verify');
+          const args = [cliPath, 'release'];
+          if (!isParent) args.push(repo.path);
+          args.push('--message', message, '--skip-prompt');
+          if (push) args.push('--push');
+          if (noVerify) args.push('--no-verify');
 
-          const command = `node ${cmdArgs.join(' ')}`;
-          let logs = `Executing CLI release:\n> ${command}\n\n`;
+          let logs = `Executing CLI release:\n> node ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}\n\n`;
           let success = true;
 
           try {
-            // Run the CLI process to execute the release logic
-            const out = execSync(command, { cwd: workspaceDir, stdio: 'pipe' }).toString();
+            const out = (await runCommand(process.execPath, args, workspaceDir, { timeoutMs: 300000 })).output;
             logs += out;
           } catch (err: any) {
             success = false;
-            logs += `❌ CLI execution failed:\n` + (err.stdout?.toString() || err.message) + '\n';
+            logs += `❌ CLI execution failed:\n` + (err.stdout || err.stderr || err.message) + '\n';
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -664,7 +659,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
     if (req.method === 'POST' && pathname === '/api/repo/build') {
       let body = '';
       req.on('data', chunk => body += chunk);
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const { repo: repoName } = JSON.parse(body);
           const repos = getRepositories(workspaceDir);
@@ -687,12 +682,12 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             return;
           }
           try {
-            const out = execSync('npm run build', { cwd: repo.path, stdio: 'pipe', timeout: 120000 }).toString();
+            const out = await runNpm(['run', 'build'], repo.path);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, logs: out }));
           } catch (err: any) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: false, logs: err.stdout?.toString() || err.message }));
+            res.end(JSON.stringify({ success: false, logs: err.stdout || err.stderr || err.message }));
           }
         } catch (err: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -706,7 +701,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
     if (req.method === 'POST' && pathname === '/api/repo/test') {
       let body = '';
       req.on('data', chunk => body += chunk);
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const { repo: repoName } = JSON.parse(body);
           const repos = getRepositories(workspaceDir);
@@ -730,12 +725,12 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             return;
           }
           try {
-            const out = execSync('npm test', { cwd: repo.path, stdio: 'pipe', timeout: 120000 }).toString();
+            const out = await runNpm(['test'], repo.path);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, logs: out }));
           } catch (err: any) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: false, logs: err.stdout?.toString() || err.message }));
+            res.end(JSON.stringify({ success: false, logs: err.stdout || err.stderr || err.message }));
           }
         } catch (err: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -749,7 +744,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
     if (req.method === 'POST' && pathname === '/api/repo/run') {
       let body = '';
       req.on('data', chunk => body += chunk);
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const { repo: repoName, script } = JSON.parse(body);
           const repos = getRepositories(workspaceDir);
@@ -783,12 +778,12 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             return;
           }
           try {
-            const out = execSync(`npm run ${script}`, { cwd: repo.path, stdio: 'pipe', timeout: 120000 }).toString();
+            const out = await runNpm(['run', script], repo.path);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, logs: out }));
           } catch (err: any) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: false, logs: err.stdout?.toString() || err.message }));
+            res.end(JSON.stringify({ success: false, logs: err.stdout || err.stderr || err.message }));
           }
         } catch (err: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -806,7 +801,6 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
         try {
           const { workspace, prompt } = JSON.parse(body);
           const wsDir = workspace || workspaceDir;
-          const { spawn } = require('child_process');
           const port = 4096 + Math.floor(Math.random() * 1000);
           const args = ['web', '--port', String(port), '--hostname', '127.0.0.1'];
           if (prompt) {
@@ -838,13 +832,18 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
       req.on('end', async () => {
         try {
           const { pid } = JSON.parse(body);
-          const { execSync } = require('child_process');
-          if (process.platform === 'win32') {
-            execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' });
-          } else {
-            execSync(`kill -9 ${pid}`, { stdio: 'ignore' });
+          const pidText = String(pid || '').trim();
+          if (!/^\d+$/.test(pidText)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid PID' }));
+            return;
           }
-          console.log(`[UI] Stopped opencode session PID: ${pid}`);
+          if (process.platform === 'win32') {
+            await runCommand('taskkill', ['/PID', pidText, '/F'], workspaceDir, { timeoutMs: 30000 });
+          } else {
+            await runCommand('kill', ['-9', pidText], workspaceDir, { timeoutMs: 30000 });
+          }
+          console.log(`[UI] Stopped opencode session PID: ${pidText}`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true }));
         } catch (err: any) {
@@ -858,18 +857,17 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
     // GET /api/opencode/sessions - Check for running opencode processes
     if (req.method === 'GET' && pathname === '/api/opencode/sessions') {
       try {
-        const { execSync } = require('child_process');
         let sessions: any[] = [];
         try {
           if (process.platform === 'win32') {
-            const output = execSync('tasklist /FI "IMAGENAME eq opencode.exe" /FO CSV /NH 2>nul || echo ""', { encoding: 'utf8' });
+            const output = (await runCommand('tasklist', ['/FI', 'IMAGENAME eq opencode.exe', '/FO', 'CSV', '/NH'], workspaceDir, { timeoutMs: 30000 })).output;
             const lines = output.split('\n').filter((l: string) => l.includes('opencode'));
             sessions = lines.map((line: string) => {
               const parts = line.split(',').map((p: string) => p.replace(/"/g, '').trim());
               return { name: parts[0], pid: parts[1], memory: parts[4] };
             });
           } else {
-            const output = execSync('pgrep -f opencode 2>/dev/null || echo ""', { encoding: 'utf8' });
+            const output = (await runCommand('pgrep', ['-f', 'opencode'], workspaceDir, { timeoutMs: 30000 })).output;
             const pids = output.trim().split('\n').filter(Boolean);
             sessions = pids.map((pid: string) => ({ name: 'opencode', pid: pid.trim(), memory: 'N/A' }));
           }

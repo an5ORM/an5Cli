@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { generateCommitMessage, generateChangelogContent, getGitDiff, getGitLog, generateCodeReview } from './llm';
 import { analyzeImpact, analyzeDocUpdates, buildSyncPlan, executeSync } from './impact';
+import { runNpm } from './command';
 
 function loadTasksModule() {
   try {
@@ -501,7 +502,7 @@ function askQuestion(query: string): Promise<string> {
   });
 }
 
-function runQualityChecks(cwd: string, options: Options): boolean {
+async function runQualityChecks(cwd: string, options: Options): Promise<boolean> {
   if (options.noVerify || process.env.AN5_CLI_CHECKS_RUNNING) {
     if (process.env.AN5_CLI_CHECKS_RUNNING) {
       // Prevent infinite recursion in tests calling the CLI
@@ -528,20 +529,20 @@ function runQualityChecks(cwd: string, options: Options): boolean {
 
     if (scripts.build) {
       console.log(`  ↳ Running build: npm run build...`);
-      execSync('npm run build', { cwd, stdio: 'pipe' });
+      await runNpm(['run', 'build'], cwd);
       console.log(`  ✓ Build passed`);
     }
 
     if (scripts.compile) {
       console.log(`  ↳ Running compilation: npm run compile...`);
-      execSync('npm run compile', { cwd, stdio: 'pipe' });
+      await runNpm(['run', 'compile'], cwd);
       console.log(`  ✓ Compile passed`);
     }
 
     const hasTestScript = scripts.test && scripts.test !== 'echo "Error: no test specified" && exit 1';
     if (hasTestScript) {
       console.log(`  ↳ Running tests: npm test...`);
-      execSync('npm test', { cwd, stdio: 'pipe' });
+      await runNpm(['test'], cwd);
       console.log(`  ✓ Tests passed`);
     }
 
@@ -551,7 +552,7 @@ function runQualityChecks(cwd: string, options: Options): boolean {
     return true;
   } catch (err: any) {
     console.error(`\n❌ Code quality checks FAILED in ${repoName}:`);
-    console.error(err.stdout?.toString() || err.message);
+    console.error(err.stdout || err.stderr || err.message);
     delete process.env.AN5_CLI_CHECKS_RUNNING;
     return false;
   }
@@ -582,7 +583,7 @@ async function releaseRepo(targetDir: string, options: Options, config: Config):
   }
 
   // 1. Run code quality checks
-  if (!runQualityChecks(resolvedDir, options)) {
+  if (!(await runQualityChecks(resolvedDir, options))) {
     console.error(`❌ Aborting release for ${repoName} due to quality check failures.`);
     return false;
   }

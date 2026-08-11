@@ -9,6 +9,7 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const llm_1 = require("./llm");
 const impact_1 = require("./impact");
+const command_1 = require("./command");
 function loadTasksModule() {
     try {
         return require('an5-tasks');
@@ -512,7 +513,7 @@ function askQuestion(query) {
         });
     });
 }
-function runQualityChecks(cwd, options) {
+async function runQualityChecks(cwd, options) {
     if (options.noVerify || process.env.AN5_CLI_CHECKS_RUNNING) {
         if (process.env.AN5_CLI_CHECKS_RUNNING) {
             // Prevent infinite recursion in tests calling the CLI
@@ -534,18 +535,18 @@ function runQualityChecks(cwd, options) {
         const scripts = pkg.scripts || {};
         if (scripts.build) {
             console.log(`  ↳ Running build: npm run build...`);
-            (0, child_process_1.execSync)('npm run build', { cwd, stdio: 'pipe' });
+            await (0, command_1.runNpm)(['run', 'build'], cwd);
             console.log(`  ✓ Build passed`);
         }
         if (scripts.compile) {
             console.log(`  ↳ Running compilation: npm run compile...`);
-            (0, child_process_1.execSync)('npm run compile', { cwd, stdio: 'pipe' });
+            await (0, command_1.runNpm)(['run', 'compile'], cwd);
             console.log(`  ✓ Compile passed`);
         }
         const hasTestScript = scripts.test && scripts.test !== 'echo "Error: no test specified" && exit 1';
         if (hasTestScript) {
             console.log(`  ↳ Running tests: npm test...`);
-            (0, child_process_1.execSync)('npm test', { cwd, stdio: 'pipe' });
+            await (0, command_1.runNpm)(['test'], cwd);
             console.log(`  ✓ Tests passed`);
         }
         console.log(`  ✨ Code quality checks passed successfully!\n`);
@@ -555,7 +556,7 @@ function runQualityChecks(cwd, options) {
     }
     catch (err) {
         console.error(`\n❌ Code quality checks FAILED in ${repoName}:`);
-        console.error(err.stdout?.toString() || err.message);
+        console.error(err.stdout || err.stderr || err.message);
         delete process.env.AN5_CLI_CHECKS_RUNNING;
         return false;
     }
@@ -588,7 +589,7 @@ async function releaseRepo(targetDir, options, config) {
             console.log(`    - ${file}`);
     }
     // 1. Run code quality checks
-    if (!runQualityChecks(resolvedDir, options)) {
+    if (!(await runQualityChecks(resolvedDir, options))) {
         console.error(`❌ Aborting release for ${repoName} due to quality check failures.`);
         return false;
     }

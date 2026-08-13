@@ -13,7 +13,7 @@ export function runCommand(
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      shell: false,
+      shell: true,
       windowsHide: true,
       env: process.env,
       stdio: options.inheritStdio ? 'inherit' : ['ignore', 'pipe', 'pipe'],

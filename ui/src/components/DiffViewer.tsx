@@ -1,5 +1,14 @@
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import type { Repository } from './Sidebar';
+import {
+  IconCopy,
+  IconFileText,
+  IconCheck,
+  IconX,
+  IconFolder,
+  IconFolderOpen,
+  IconGitBranch,
+} from './Icons';
 
 interface DiffViewerProps {
   repo: Repository;
@@ -9,6 +18,98 @@ interface DiffViewerProps {
   onCopy: () => void;
 }
 
+interface TreeNode {
+  name: string;
+  fullPath: string;
+  status: string;
+  statusClass: string;
+  children?: TreeNode[];
+  isDir?: boolean;
+}
+
+function buildFileTree(files: string[]): TreeNode[] {
+  const root: TreeNode[] = [];
+  const dirMap = new Map<string, TreeNode>();
+
+  const sorted = [...files].sort();
+
+  for (const file of sorted) {
+    let status = 'M';
+    let statusClass = 'modified';
+    if (file.startsWith('A ')) { status = 'A'; statusClass = 'added'; }
+    else if (file.startsWith('D ')) { status = 'D'; statusClass = 'deleted'; }
+    else if (file.startsWith('R ')) { status = 'R'; statusClass = 'renamed'; }
+    else if (file.startsWith('??')) { status = 'U'; statusClass = 'untracked'; }
+
+    const cleanPath = file.replace(/^[MADRU?\s]{1,2}\s+/, '');
+    const parts = cleanPath.split('/');
+
+    if (parts.length === 1) {
+      root.push({ name: parts[0], fullPath: cleanPath, status, statusClass });
+    } else {
+      let currentLevel = root;
+      let currentPath = '';
+      for (let i = 0; i < parts.length - 1; i++) {
+        currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
+        let dir = dirMap.get(currentPath);
+        if (!dir) {
+          dir = { name: parts[i], fullPath: currentPath, status: '', statusClass: '', isDir: true, children: [] };
+          dirMap.set(currentPath, dir);
+          currentLevel.push(dir);
+        }
+        currentLevel = dir.children!;
+      }
+      currentLevel.push({
+        name: parts[parts.length - 1],
+        fullPath: cleanPath,
+        status,
+        statusClass,
+      });
+    }
+  }
+  return root;
+}
+
+const TreeItem: React.FC<{
+  node: TreeNode;
+  depth: number;
+  selectedFile: string | null;
+  onSelectFile: (f: string) => void;
+}> = ({ node, depth, selectedFile, onSelectFile }) => {
+  const [open, setOpen] = useState(true);
+  const isActive = selectedFile === node.fullPath;
+
+  if (node.isDir) {
+    return (
+      <div>
+        <button
+          className="diff-tree-dir"
+          style={{ paddingLeft: `${8 + depth * 12}px` }}
+          onClick={() => setOpen(!open)}
+        >
+          {open ? <IconFolderOpen size={12} color="#6ee7b7" /> : <IconFolder size={12} color="#6ee7b7" />}
+          <span className="diff-tree-dir-name">{node.name}</span>
+        </button>
+        {open && node.children?.map((child, i) => (
+          <TreeItem key={i} node={child} depth={depth + 1} selectedFile={selectedFile} onSelectFile={onSelectFile} />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      className={`diff-tree-file ${isActive ? 'active' : ''}`}
+      style={{ paddingLeft: `${8 + depth * 12}px` }}
+      onClick={() => onSelectFile(node.fullPath)}
+      title={node.fullPath}
+    >
+      <span className={`diff-status-letter ${node.statusClass}`}>{node.status}</span>
+      <span className="diff-tree-filename">{node.name}</span>
+    </button>
+  );
+};
+
 export const DiffViewer: React.FC<DiffViewerProps> = ({
   repo,
   selectedFile,
@@ -16,73 +117,167 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   diff,
   onCopy
 }) => {
-  const renderLines = () => {
-    if (!diff) return <code>Select a repository with changes to view the git diff.</code>;
+  const [copied, setCopied] = useState(false);
+  const [fileFilter, setFileFilter] = useState('');
+
+  const handleCopy = () => {
+    onCopy();
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const modifiedFiles = repo.modifiedFiles || [];
+
+  const filteredFiles = useMemo(() => {
+    if (!fileFilter) return modifiedFiles;
+    return modifiedFiles.filter(f => f.toLowerCase().includes(fileFilter.toLowerCase()));
+  }, [modifiedFiles, fileFilter]);
+
+  const fileTree = useMemo(() => buildFileTree(filteredFiles), [filteredFiles]);
+
+  const stats = useMemo(() => {
+    if (!diff) return { additions: 0, deletions: 0 };
+    let add = 0, del = 0;
     const lines = diff.split('\n');
-    return lines.map((line, idx) => {
-      let className = '';
-      if (line.startsWith('+') && !line.startsWith('+++')) {
-        className = 'diff-add';
-      } else if (line.startsWith('-') && !line.startsWith('---')) {
-        className = 'diff-remove';
-      } else if (line.startsWith('@@') || line.startsWith('diff --git')) {
-        className = 'diff-header-line';
-      }
+    for (const line of lines) {
+      if (line.startsWith('+') && !line.startsWith('+++')) add++;
+      else if (line.startsWith('-') && !line.startsWith('---')) del++;
+    }
+    return { additions: add, deletions: del };
+  }, [diff]);
+
+  const renderDiffLines = () => {
+    if (!diff || diff === 'Loading git diff...') {
       return (
-        <span key={idx} className={className} style={{ display: 'block' }}>
-          {line + '\n'}
-        </span>
+        <div className="diff-empty-state">
+          <div className="diff-spinner" />
+          <span>Loading diff...</span>
+        </div>
+      );
+    }
+    if (modifiedFiles.length === 0 || diff === 'No diff output or clean workspace.') {
+      return (
+        <div className="diff-empty-state clean">
+          <IconCheck size={22} color="#10b981" />
+          <span>Working tree is clean</span>
+        </div>
+      );
+    }
+
+    const lines = diff.split('\n');
+    let oldNum = 0, newNum = 0;
+
+    return lines.map((line, idx) => {
+      let cls = 'diff-ctx';
+      let oldStr = '', newStr = '';
+      let prefix = ' ';
+
+      if (line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ')) {
+        cls = 'diff-meta';
+        prefix = '';
+      } else if (line.startsWith('@@')) {
+        cls = 'diff-hunk-line';
+        prefix = '';
+        const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (m) { oldNum = parseInt(m[1]); newNum = parseInt(m[2]); }
+      } else if (line.startsWith('+')) {
+        cls = 'diff-add-line';
+        prefix = '+';
+        newStr = String(newNum++);
+      } else if (line.startsWith('-')) {
+        cls = 'diff-del-line';
+        prefix = '-';
+        oldStr = String(oldNum++);
+      } else if (line.trim() !== '') {
+        cls = 'diff-ctx';
+        prefix = ' ';
+        oldStr = oldNum > 0 ? String(oldNum++) : '';
+        newStr = newNum > 0 ? String(newNum++) : '';
+      }
+
+      const content = (cls === 'diff-meta' || cls === 'diff-hunk-line') ? line : line.slice(1);
+
+      return (
+        <div key={idx} className={`dlr ${cls}`}>
+          <span className="dl-num">{oldStr}</span>
+          <span className="dl-num">{newStr}</span>
+          <span className="dl-pfx">{prefix}</span>
+          <span className="dl-txt">{content}</span>
+        </div>
       );
     });
   };
 
   return (
-    <section className="panel left-panel">
-      <div className="panel-header">
-        <h3>Modified Files</h3>
-        <span className="count-badge">{repo.modifiedFiles?.length || 0}</span>
-      </div>
-      <div className="panel-body">
-        <ul className="files-list">
-          <li
-            className={`file-tag ${selectedFile === null ? 'active' : ''}`}
+    <section className="panel left-panel diff-panel">
+      {/* Left: File Tree */}
+      <div className="diff-files-sidebar">
+        <div className="diff-files-header">
+          <div className="diff-files-title">
+            <IconFileText size={13} color="var(--color-primary)" />
+            <span>Files</span>
+            <span className="diff-file-count">{modifiedFiles.length}</span>
+          </div>
+          <div className="diff-file-search-wrap">
+            <input
+              className="diff-file-search"
+              type="text"
+              placeholder="Filter..."
+              value={fileFilter}
+              onChange={e => setFileFilter(e.target.value)}
+            />
+            {fileFilter && (
+              <button className="diff-search-clear" onClick={() => setFileFilter('')}>
+                <IconX size={10} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="diff-tree-scroll">
+          {/* All Changes */}
+          <button
+            className={`diff-tree-file all-changes ${selectedFile === null ? 'active' : ''}`}
+            style={{ paddingLeft: '8px' }}
             onClick={() => onSelectFile(null)}
           >
-            <span>All Changes</span>
-          </li>
-          {repo.modifiedFiles?.map(file => {
-            let statusClass = 'modified';
-            if (file.startsWith('A ')) statusClass = 'added';
-            if (file.startsWith('D ')) statusClass = 'deleted';
-            const fileName = file.replace(/^[MADRU?\s]{1,2}\s+/, '');
-            const isActive = selectedFile === fileName;
+            <span className="diff-status-letter all">~</span>
+            <span className="diff-tree-filename">All Changes</span>
+          </button>
 
-            return (
-              <li
-                key={file}
-                className={`file-tag ${isActive ? 'active' : ''}`}
-                onClick={() => onSelectFile(fileName)}
-              >
-                <span className={`file-status ${statusClass}`}></span>
-                <span>{fileName}</span>
-              </li>
-            );
-          })}
-        </ul>
+          {fileTree.map((node, i) => (
+            <TreeItem
+              key={i}
+              node={node}
+              depth={0}
+              selectedFile={selectedFile}
+              onSelectFile={onSelectFile}
+            />
+          ))}
+        </div>
+      </div>
 
-        <div className="diff-viewer-container">
-          <div className="diff-header">
-            <h4>Git Diff Preview</h4>
-            <button className="btn btn-icon" onClick={onCopy} title="Copy Diff">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-              </svg>
-            </button>
+      {/* Right: Code Diff */}
+      <div className="diff-code-viewer">
+        <div className="diff-viewer-toolbar">
+          <div className="diff-toolbar-left">
+            <IconGitBranch size={12} color="var(--color-primary)" />
+            <span className="diff-target-label">{selectedFile || 'All Modified Files'}</span>
+            {(stats.additions > 0 || stats.deletions > 0) && (
+              <div className="diff-stat-pills">
+                <span className="diff-stat-add">+{stats.additions}</span>
+                <span className="diff-stat-del">-{stats.deletions}</span>
+              </div>
+            )}
           </div>
-          <pre className="diff-view">
-            <code>{renderLines()}</code>
-          </pre>
+          <button className={`btn-diff-copy ${copied ? 'copied' : ''}`} onClick={handleCopy}>
+            {copied ? <IconCheck size={12} color="#10b981" /> : <IconCopy size={12} />}
+            <span>{copied ? 'Copied' : 'Copy'}</span>
+          </button>
+        </div>
+
+        <div className="diff-code-scroll">
+          {renderDiffLines()}
         </div>
       </div>
     </section>

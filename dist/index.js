@@ -573,6 +573,11 @@ async function releaseRepo(targetDir, options, config) {
     }
     const repoName = getRepoName(resolvedDir);
     const branch = options.branch || config.defaultBranch || detectBranch(resolvedDir);
+    const currentBranch = git(['-C', resolvedDir, 'rev-parse', '--abbrev-ref', 'HEAD'], true);
+    if (currentBranch === 'HEAD' || !currentBranch) {
+        console.log(`  ⚡ [${repoName}] Detached HEAD detected -> switching to branch '${branch}'...`);
+        git(['-C', resolvedDir, 'checkout', branch], true);
+    }
     if (options.pull) {
         console.log(`  Pulling ${repoName}...`);
         git(['-C', resolvedDir, 'pull', 'origin', branch], true);
@@ -1083,6 +1088,7 @@ async function main() {
         console.log(`  Initializing and updating git submodules...`);
         git(['-C', targetDir, 'submodule', 'update', '--init', '--recursive'], true);
         git(['-C', targetDir, 'submodule', 'update', '--remote', '--merge'], true);
+        git(['-C', targetDir, 'submodule', 'foreach', 'git checkout main || true'], true);
         const submodules = getSubmodules(targetDir);
         if (submodules.length === 0) {
             console.log('No submodules or git repos found in this directory.');

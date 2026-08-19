@@ -29,45 +29,113 @@ function git(args: string[], cwd: string): string {
   }
 }
 
-// Find repository absolute paths based on root package.json
+// Find repository absolute paths based on root package.json and .gitmodules
 function getRepositories(workspaceDir: string) {
-  const list: { name: string; path: string; description: string; modifiedFiles: string[] }[] = [];
+  const list: {
+    name: string;
+    path: string;
+    description: string;
+    branch: string;
+    isDetached: boolean;
+    commitHash: string;
+    commitMessage: string;
+    modifiedFiles: string[];
+    isParent?: boolean;
+  }[] = [];
   
   // 1. Add parent workspace repository
   try {
     const parentPkg = JSON.parse(fs.readFileSync(path.join(workspaceDir, 'package.json'), 'utf8'));
     list.push({
-      name: parentPkg.name || 'an5-workspace (parent)',
+      name: parentPkg.name || 'an5-workspace',
       path: workspaceDir,
       description: parentPkg.description || 'Parent workspace repository managing submodules',
-      modifiedFiles: []
+      branch: '',
+      isDetached: false,
+      commitHash: '',
+      commitMessage: '',
+      modifiedFiles: [],
+      isParent: true,
     });
 
-    // 2. Add submodules from package.json repos array
-    if (parentPkg.repos && Array.isArray(parentPkg.repos)) {
-      for (const repo of parentPkg.repos) {
-        const repoPath = path.join(workspaceDir, repo.path);
-        if (fs.existsSync(repoPath)) {
-          list.push({
-            name: repo.name,
-            path: repoPath,
-            description: repo.description || '',
-            modifiedFiles: []
-          });
+    // 2. Discover submodules from .gitmodules
+    const gitmodulesPath = path.join(workspaceDir, '.gitmodules');
+    const seenPaths = new Set<string>();
+    if (fs.existsSync(gitmodulesPath)) {
+      const content = fs.readFileSync(gitmodulesPath, 'utf8');
+      const regex = /path\s*=\s*(\S+)/g;
+      let match;
+      while ((match = regex.exec(content)) !== null) {
+        const relPath = match[1].trim();
+        seenPaths.add(relPath);
+      }
+    }
+
+    // Also include from workspaces in package.json if any
+    if (Array.isArray(parentPkg.workspaces)) {
+      for (const ws of parentPkg.workspaces) {
+        if (typeof ws === 'string' && !ws.includes('*') && !ws.includes('/')) {
+          seenPaths.add(ws);
         }
       }
     }
+
+    for (const relPath of seenPaths) {
+      const repoPath = path.join(workspaceDir, relPath);
+      if (fs.existsSync(repoPath)) {
+        let desc = '';
+        const subPkgPath = path.join(repoPath, 'package.json');
+        if (fs.existsSync(subPkgPath)) {
+          try {
+            const subPkg = JSON.parse(fs.readFileSync(subPkgPath, 'utf8'));
+            desc = subPkg.description || '';
+          } catch {}
+        }
+        list.push({
+          name: relPath,
+          path: repoPath,
+          description: desc,
+          branch: '',
+          isDetached: false,
+          commitHash: '',
+          commitMessage: '',
+          modifiedFiles: [],
+          isParent: false,
+        });
+      }
+    }
   } catch (err) {
-    console.error('Error parsing package.json:', err);
+    console.error('Error parsing repositories:', err);
   }
 
-  // Populate git status modified files
+  // Populate git status, branch, and commit info
   for (const repo of list) {
     try {
       if (fs.existsSync(path.join(repo.path, '.git'))) {
-        // Refresh index
         execSync('git update-index --refresh', { cwd: repo.path, stdio: 'ignore' });
       }
+    } catch {}
+
+    // Branch & Detached check
+    try {
+      const currentBranch = git(['rev-parse', '--abbrev-ref', 'HEAD'], repo.path);
+      const isDetached = currentBranch === 'HEAD' || !currentBranch;
+      repo.isDetached = isDetached;
+      if (isDetached) {
+        const shortHash = git(['rev-parse', '--short', 'HEAD'], repo.path);
+        repo.branch = shortHash ? `⚲ ${shortHash}` : 'detached';
+      } else {
+        repo.branch = currentBranch;
+      }
+    } catch {
+      repo.branch = 'main';
+      repo.isDetached = false;
+    }
+
+    // Latest Commit
+    try {
+      repo.commitHash = git(['rev-parse', '--short', 'HEAD'], repo.path) || '';
+      repo.commitMessage = git(['log', '-1', '--pretty=%s'], repo.path) || '';
     } catch {}
 
     const status = git(['status', '--porcelain'], repo.path);
@@ -866,8 +934,6 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
               const parts = line.split(',').map((p: string) => p.replace(/"/g, '').trim());
               return { name: parts[0], pid: parts[1], memory: parts[4] };
             });
-          } else {
-            const output = (await runCommand('pgrep', ['-f', 'opencode'], workspaceDir, { timeoutMs: 30000 })).output;
             const pids = output.trim().split('\n').filter(Boolean);
             sessions = pids.map((pid: string) => ({ name: 'opencode', pid: pid.trim(), memory: 'N/A' }));
           }
@@ -878,6 +944,137 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
+      return;
+    }
+
+    // POST /api/repo/checkout-main - Switch a repository to main branch and pull
+    if (req.method === 'POST' && pathname === '/api/repo/checkout-main') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const { repo: repoName } = JSON.parse(body);
+          const repos = getRepositories(workspaceDir);
+          const repo = repos.find(r => r.name === repoName);
+          if (!repo) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Repository not found' }));
+            return;
+          }
+          let logs = `↳ [${repo.name}] Checking out main branch and pulling latest...\n`;
+          let success = true;
+          try {
+            const out1 = (await runCommand('git', ['checkout', 'main'], repo.path)).output;
+            logs += out1 + '\n';
+            const out2 = (await runCommand('git', ['pull', 'origin', 'main'], repo.path)).output;
+            logs += out2 + '\n✓ Switched to main and pulled latest\n';
+          } catch (err: any) {
+            success = false;
+            logs += `❌ Failed to checkout main:\n` + (err.stdout || err.stderr || err.message) + '\n';
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success, logs }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /api/workspace/sync - Sync all submodules and checkout main
+    if (req.method === 'POST' && pathname === '/api/workspace/sync') {
+      try {
+        let logs = `↳ [Workspace] Updating git submodules...\n`;
+        let success = true;
+        try {
+          const out1 = (await runCommand('git', ['submodule', 'update', '--init', '--recursive'], workspaceDir)).output;
+          logs += out1 + '\n';
+          const out2 = (await runCommand('git', ['submodule', 'foreach', 'git checkout main && git pull origin main || true'], workspaceDir)).output;
+          logs += out2 + '\n✓ Workspace synced and all submodules checked out to main\n';
+        } catch (err: any) {
+          success = false;
+          logs += `❌ Workspace sync failed:\n` + (err.stdout || err.stderr || err.message) + '\n';
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success, logs }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // POST /api/workspace/build - Build all workspace packages
+    if (req.method === 'POST' && pathname === '/api/workspace/build') {
+      try {
+        let logs = `↳ [Workspace] Running build...\n`;
+        let success = true;
+        try {
+          const out = await runNpm(['run', 'build'], workspaceDir);
+          logs += out + '\n✓ Workspace build completed successfully\n';
+        } catch (err: any) {
+          success = false;
+          logs += `❌ Build failed:\n` + (err.stdout || err.stderr || err.message) + '\n';
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success, logs }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // POST /api/workspace/test - Run workspace tests
+    if (req.method === 'POST' && pathname === '/api/workspace/test') {
+      try {
+        let logs = `↳ [Workspace] Running tests...\n`;
+        let success = true;
+        try {
+          const out = await runNpm(['test'], workspaceDir);
+          logs += out + '\n✓ Workspace tests passed\n';
+        } catch (err: any) {
+          success = false;
+          logs += `❌ Tests failed:\n` + (err.stdout || err.stderr || err.message) + '\n';
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success, logs }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // POST /api/tasks/create - Create a new task in tasks.json
+    if (req.method === 'POST' && pathname === '/api/tasks/create') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        const tasksModule = loadTasksModule();
+        if (!tasksModule) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'an5Tasks module not built' }));
+          return;
+        }
+        try {
+          const { workspace, title, description, priority, file } = JSON.parse(body);
+          const wsDir = workspace || workspaceDir;
+          const newTask = await tasksModule.createTask(wsDir, {
+            title: title || 'Untitled Task',
+            description: description || '',
+            priority: priority || 'medium',
+            file: file || undefined,
+            status: 'todo',
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, task: newTask }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
       return;
     }
 

@@ -66,6 +66,7 @@ function getRepositories(workspaceDir: string) {
       const regex = /path\s*=\s*(\S+)/g;
       let match;
       while ((match = regex.exec(content)) !== null) {
+        if (match[1] === undefined) continue;
         const relPath = match[1].trim();
         seenPaths.add(relPath);
       }
@@ -1127,7 +1128,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
 
     // Automatically open browser on startup
     const startCmd = process.platform === 'win32' ? 'start' : process.platform === 'darwin' ? 'open' : 'xdg-open';
-    exec(`${startCmd} ${url}`, (err) => {
+    exec(`${startCmd} ${url}`, () => {
       // Ignore opening errors in headless environments
     });
   });

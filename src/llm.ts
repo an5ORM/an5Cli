@@ -8,8 +8,8 @@ export type LLMProvider = 'openai' | 'gemini' | 'custom';
 export interface LLMConfig {
   provider: LLMProvider;
   apiKey: string;
-  model?: string;
-  endpoint?: string;
+  model?: string | undefined;
+  endpoint?: string | undefined;
 }
 
 function loadEnv() {
@@ -24,8 +24,8 @@ function loadEnv() {
           if (!trimmed || trimmed.startsWith('#')) continue;
           const match = trimmed.match(/^([^=]+)=(.*)$/);
           if (match) {
-            const key = match[1].trim();
-            let val = match[2].trim();
+            const key = (match[1] ?? '').trim();
+            let val = (match[2] ?? '').trim();
             if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
               val = val.slice(1, -1);
             }

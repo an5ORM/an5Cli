@@ -75,7 +75,7 @@ function getChangedFiles(repoPath: string): string[] {
   const files: string[] = [];
   for (const line of status.split('\n')) {
     const match = line.match(/^([ MADRCU?!]{1,2})\s+(.*)$/);
-    if (match) files.push(match[2].trim());
+    if (match?.[2] !== undefined) files.push(match[2].trim());
   }
   return files;
 }

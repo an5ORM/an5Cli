@@ -2,8 +2,8 @@
 import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { generateCommitMessage, generateChangelogContent, getGitDiff, getGitLog, generateCodeReview } from './llm';
-import { analyzeImpact, analyzeDocUpdates, buildSyncPlan, executeSync } from './impact';
+import { generateCommitMessage, getGitLog, generateCodeReview } from './llm';
+import { analyzeImpact, analyzeDocUpdates, executeSync } from './impact';
 import { runNpm } from './command';
 
 function loadTasksModule() {
@@ -45,9 +45,9 @@ interface Options {
   dryRun: boolean;
   push: boolean;
   pull: boolean;
-  tag?: string;
-  message?: string;
-  branch?: string;
+  tag?: string | undefined;
+  message?: string | undefined;
+  branch?: string | undefined;
   all?: boolean;
   skipLlm?: boolean;
   skipPrompt?: boolean;
@@ -55,12 +55,12 @@ interface Options {
   skipDocs?: boolean;
   skipBuild?: boolean;
   taskAction?: string;
-  taskId?: string;
-  taskStatus?: string;
-  taskPriority?: string;
+  taskId?: string | undefined;
+  taskStatus?: string | undefined;
+  taskPriority?: string | undefined;
   tunnelAction?: string;
   tunnelPort?: number;
-  tunnelSubdomain?: string;
+  tunnelSubdomain?: string | undefined;
 }
 
 function git(args: string[], allowFail = false): string {
@@ -156,6 +156,7 @@ function parseArgs(argv: string[]): Options {
   let scriptName = '';
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (arg === undefined) continue;
     if (arg === 'tasks') {
       options.command = 'tasks';
       const next = argv[i + 1];
@@ -182,20 +183,20 @@ function parseArgs(argv: string[]): Options {
     else if (arg === '--dry-run') { options.dryRun = true; }
     else if (arg === '--push') { options.push = true; }
     else if (arg === '--pull') { options.pull = true; }
-    else if (arg === '--tag') { options.tag = argv[++i]; }
-    else if (arg === '--message') { options.message = argv[++i]; }
-    else if (arg === '--branch') { options.branch = argv[++i]; }
+    else if (arg === '--tag') { options.tag = argv[++i] ?? options.tag; }
+    else if (arg === '--message') { options.message = argv[++i] ?? options.message; }
+    else if (arg === '--branch') { options.branch = argv[++i] ?? options.branch; }
     else if (arg === '--all') { options.all = true; }
     else if (arg === '--skip-llm') { options.skipLlm = true; }
     else if (arg === '--skip-prompt') { options.skipPrompt = true; }
     else if (arg === '--no-verify') { options.noVerify = true; }
     else if (arg === '--skip-docs') { options.skipDocs = true; }
     else if (arg === '--skip-build') { options.skipBuild = true; }
-    else if (arg === '--status') { options.taskStatus = argv[++i]; }
-    else if (arg === '--priority') { options.taskPriority = argv[++i]; }
-    else if (arg === '--id') { options.taskId = argv[++i]; }
-    else if (arg === '--subdomain') { options.tunnelSubdomain = argv[++i]; }
-    else if (arg === '--tunnel-port') { options.tunnelPort = parseInt(argv[++i], 10); }
+    else if (arg === '--status') { options.taskStatus = argv[++i] ?? options.taskStatus; }
+    else if (arg === '--priority') { options.taskPriority = argv[++i] ?? options.taskPriority; }
+    else if (arg === '--id') { options.taskId = argv[++i] ?? options.taskId; }
+    else if (arg === '--subdomain') { options.tunnelSubdomain = argv[++i] ?? options.tunnelSubdomain; }
+    else if (arg === '--tunnel-port') { options.tunnelPort = parseInt(argv[++i] ?? '', 10); }
     else if (arg === '--help' || arg === '-h') { printHelp(); process.exit(0); }
     else if (arg.startsWith('--')) { throw new Error(`Unknown option: ${arg}`); }
     else if (arg !== 'release' && arg !== 'ws' && options.command !== 'tasks') { options.targetDir = path.resolve(arg); }
@@ -221,7 +222,7 @@ function collectChanges(cwd: string): ChangeGroup[] {
   const files: string[] = [];
   for (const line of status.split('\n')) {
     const match = line.match(/^([ MADRCU?!]{1,2})\s+(.*)$/);
-    if (match) {
+    if (match?.[2] !== undefined) {
       files.push(match[2].trim());
     }
   }
@@ -240,7 +241,8 @@ function detectVersion(cwd: string, tag?: string): string {
     const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8'));
     if (pkg.version) {
       const parts = pkg.version.split('.').map(Number);
-      parts[parts.length - 1] = (parts[parts.length - 1] || 0) + 1;
+      const last = parts.pop() ?? 0;
+      parts.push((last || 0) + 1);
       return parts.join('.');
     }
   } catch { /* fall through */ }
@@ -250,7 +252,7 @@ function detectVersion(cwd: string, tag?: string): string {
 function formatCommitMessageForChangelog(commitMessage: string): string {
   const lines = commitMessage.trim().split('\n').map(l => l.trimEnd());
   if (lines.length === 0) return '';
-  const subject = lines[0].trim();
+  const subject = (lines[0] ?? '').trim();
   const bodyLines = lines.slice(1).map(l => l.trim());
   const result: string[] = [];
   result.push(`- ${subject}`);
@@ -365,16 +367,6 @@ function storeCredentialForRepo(cwd: string, username: string, token: string) {
       encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch { /* fall through */ }
-}
-
-function storeCredential(username: string, token: string) {
-  try {
-    const input = `protocol=https\nhost=github.com\nusername=${username}\npassword=${token}\n`;
-    execFileSync('git', ['credential', 'approve'], { encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] });
-    console.log('  Credential stored in Git Credential Manager.');
-  } catch {
-    console.log('  Note: Could not store credential in GCM. Token may need to be embedded in remote URL.');
-  }
 }
 
 function ghAuthAvailable(): boolean {
@@ -701,7 +693,9 @@ function getSubmodules(cwd: string): string[] {
   const paths: string[] = [];
   const regex = /path\s*=\s*(\S+)/g;
   let match;
-  while ((match = regex.exec(content)) !== null) paths.push(match[1]);
+  while ((match = regex.exec(content)) !== null) {
+    if (match[1] !== undefined) paths.push(match[1]);
+  }
   return paths.length > 0 ? paths : fs.readdirSync(cwd).filter(d => !d.startsWith('.') && fs.existsSync(path.join(cwd, d, '.git')));
 }
 
@@ -836,6 +830,7 @@ async function cmdFormat(targetPath: string): Promise<void> {
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
+      if (line === undefined) continue;
       const trimmed = line.trim();
 
       if (trimmed.startsWith('model ') && trimmed.endsWith('{')) {
@@ -1019,9 +1014,9 @@ async function main() {
     console.log(`\n🔄 Sync: ${resolvedDir}\n`);
     const results = await executeSync(resolvedDir, {
       dryRun: options.dryRun,
-      skipDocs: options.skipDocs,
-      skipBuild: options.skipBuild,
-      skipPrompt: options.skipPrompt,
+      ...(options.skipDocs !== undefined ? { skipDocs: options.skipDocs } : {}),
+      ...(options.skipBuild !== undefined ? { skipBuild: options.skipBuild } : {}),
+      ...(options.skipPrompt !== undefined ? { skipPrompt: options.skipPrompt } : {}),
     });
     const succeeded = results.filter(r => r.success).length;
     const failed = results.filter(r => !r.success).length;

@@ -51,7 +51,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isBuilding = false,
   isTesting = false,
   isOpen = false,
-  onClose: _onClose
+  onClose
 }) => {
   const [filterText, setFilterText] = useState('');
 
@@ -78,7 +78,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         <div className="brand-quick-actions">
-          <button 
+          {isOpen && onClose && (
+            <button
+              className="btn-icon-brand"
+              onClick={onClose}
+              title="Close menu"
+              aria-label="Close menu"
+            >
+              <IconX size={13} />
+            </button>
+          )}
+          <button
             className={`btn-icon-brand ${isRefreshing ? 'loading' : ''}`}
             onClick={onRefreshAll}
             disabled={isRefreshing}

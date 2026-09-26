@@ -18,6 +18,7 @@ import {
   IconGitMerge,
   IconFolderOpen,
   IconFileText,
+  IconSettings,
 } from './components/Icons';
 
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL) || '';
@@ -56,11 +57,31 @@ export default function App() {
   const [isTesting, setIsTesting] = useState(false);
   const [workspaceConsole, setWorkspaceConsole] = useState<{ title: string; output: string; success: boolean } | null>(null);
 
-  const { toasts, addToast } = useToast();
+  const { toasts, addToast, dismissToast } = useToast();
 
   const activeTab = activeTabIndex >= 0 ? openTabs[activeTabIndex] : null;
 
-  useEffect(() => { loadStatus(); }, []);
+  useEffect(() => {
+    loadStatus();
+    // Gentle auto-refresh so branch/dirty badges never go stale.
+    const timer = setInterval(() => {
+      if (!document.hidden) loadStatus();
+    }, 15000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Close drawer / dialogs with Escape.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSidebarOpen(false);
+        setIsSettingsOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const handleSelectRepo = (repo: Repository | null) => {
     setSidebarOpen(false);
@@ -265,14 +286,19 @@ export default function App() {
 
   return (
     <div className="app-container">
-      {/* Mobile Header */}
-      <div className="mobile-header" style={{ display: 'none' }}>
-        <button className="mobile-menu-btn" onClick={() => setSidebarOpen(!sidebarOpen)}>
+      {/* Mobile Header (visible ≤860px via CSS) */}
+      <div className="mobile-header">
+        <button className="mobile-menu-btn" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Toggle repositories menu">
           {sidebarOpen ? '✕' : '☰'}
         </button>
         <span className="mobile-title">an5ORM Workspace</span>
         <div className="mobile-header-actions">
-          <button className="btn-icon" onClick={() => setIsSettingsOpen(true)} title="Settings">⚙️</button>
+          <button className="btn-icon" onClick={() => loadStatus()} title="Refresh status" aria-label="Refresh status">
+            <IconRefresh size={14} />
+          </button>
+          <button className="btn-icon" onClick={() => setIsSettingsOpen(true)} title="Settings" aria-label="Open settings">
+            <IconSettings size={14} />
+          </button>
         </div>
       </div>
 
@@ -412,6 +438,12 @@ export default function App() {
                 </div>
               )}
 
+              {repos.length === 0 && !isRefreshing && (
+                <div className="empty-tasks-box">
+                  <p>No repositories detected. Start the UI from the workspace root so <code>package.json</code> and <code>.gitmodules</code> can be discovered, then press Refresh.</p>
+                </div>
+              )}
+
               {/* Workspace Health Matrix Table */}
               <div className="health-table-card">
                 <div className="table-wrapper">
@@ -488,7 +520,7 @@ export default function App() {
       </main>
 
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} onToast={addToast} />
-      <ToastContainer toasts={toasts} />
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

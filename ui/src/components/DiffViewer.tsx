@@ -34,33 +34,43 @@ function buildFileTree(files: string[]): TreeNode[] {
   const sorted = [...files].sort();
 
   for (const file of sorted) {
+    // Porcelain v1: 2-char status (XY) + space + path, e.g. " M src/a.ts", "A  src/b.ts", "?? new.ts", "R  old -> new"
+    const xy = file.slice(0, 2);
+    let rawPath = file.slice(3).trim();
+    // Renames carry "old -> new": the diff viewer works on the new path.
+    if (rawPath.includes(' -> ')) {
+      rawPath = rawPath.split(' -> ').pop()!.trim();
+    }
+    // Strip surrounding quotes git adds for paths with spaces.
+    const cleanPath = rawPath.replace(/^"|"$/g, '');
+
     let status = 'M';
     let statusClass = 'modified';
-    if (file.startsWith('A ')) { status = 'A'; statusClass = 'added'; }
-    else if (file.startsWith('D ')) { status = 'D'; statusClass = 'deleted'; }
-    else if (file.startsWith('R ')) { status = 'R'; statusClass = 'renamed'; }
-    else if (file.startsWith('??')) { status = 'U'; statusClass = 'untracked'; }
+    if (xy === '??') { status = 'U'; statusClass = 'untracked'; }
+    else if (xy.includes('A')) { status = 'A'; statusClass = 'added'; }
+    else if (xy.includes('D')) { status = 'D'; statusClass = 'deleted'; }
+    else if (xy.includes('R') || xy.includes('C')) { status = 'R'; statusClass = 'renamed'; }
 
-    const cleanPath = file.replace(/^[MADRU?\s]{1,2}\s+/, '');
     const parts = cleanPath.split('/');
 
     if (parts.length === 1) {
-      root.push({ name: parts[0], fullPath: cleanPath, status, statusClass });
+      root.push({ name: parts[0] ?? cleanPath, fullPath: cleanPath, status, statusClass });
     } else {
       let currentLevel = root;
       let currentPath = '';
       for (let i = 0; i < parts.length - 1; i++) {
-        currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
+        const segment = parts[i] ?? '';
+        currentPath = currentPath ? `${currentPath}/${segment}` : segment;
         let dir = dirMap.get(currentPath);
         if (!dir) {
-          dir = { name: parts[i], fullPath: currentPath, status: '', statusClass: '', isDir: true, children: [] };
+          dir = { name: segment, fullPath: currentPath, status: '', statusClass: '', isDir: true, children: [] };
           dirMap.set(currentPath, dir);
           currentLevel.push(dir);
         }
         currentLevel = dir.children!;
       }
       currentLevel.push({
-        name: parts[parts.length - 1],
+        name: parts[parts.length - 1] ?? cleanPath,
         fullPath: cleanPath,
         status,
         statusClass,

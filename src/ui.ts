@@ -139,15 +139,41 @@ function getRepositories(workspaceDir: string) {
       repo.commitMessage = git(['log', '-1', '--pretty=%s'], repo.path) || '';
     } catch {}
 
+    // NOTE: keep raw porcelain lines (leading space is significant: " M file").
     const status = git(['status', '--porcelain'], repo.path);
     if (status) {
-      repo.modifiedFiles = status.split('\n').map(line => line.trim()).filter(Boolean);
+      repo.modifiedFiles = status.split('\n').filter(line => line.trim() !== '');
     } else {
       repo.modifiedFiles = [];
     }
   }
 
+  // Stable order: parent workspace first, then alphabetical.
+  list.sort((a, b) => {
+    if (!!a.isParent !== !!b.isParent) return a.isParent ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
   return list;
+}
+
+// Unified diff helper: `git diff HEAD` misses untracked files, so fall back
+// to rendering new-file content as an added diff.
+function getDiff(repoPath: string, file?: string | null): string {
+  const diffArgs = file ? ['diff', 'HEAD', '--', file] : ['diff', 'HEAD'];
+  const diff = git(diffArgs, repoPath);
+  if (diff || !file) return diff;
+  try {
+    const abs = path.join(repoPath, file);
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+      const untracked = git(['ls-files', '--others', '--exclude-standard', '--', file], repoPath);
+      if (untracked) {
+        const content = fs.readFileSync(abs, 'utf8');
+        return `diff --git a/${file} b/${file}\nnew file mode 100644\n--- /dev/null\n+++ b/${file}\n${content.split('\n').map(l => `+${l}`).join('\n')}`;
+      }
+    }
+  } catch { /* fall through */ }
+  return diff;
 }
 
 export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean; subdomain?: string }) {
@@ -172,26 +198,57 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
 
     console.log(`[UI] ${req.method} ${pathname}`);
 
-    // Serve Static Files
+    // Health check (used by UI + monitoring, no repo scan)
+    if (req.method === 'GET' && pathname === '/api/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, workspace: workspaceDir }));
+      return;
+    }
+
+    // Serve Static Files (SPA-aware: unknown paths fall back to index.html)
     if (req.method === 'GET' && !pathname.startsWith('/api/')) {
       const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-      
+
       const distDir = path.join(__dirname, '..', 'ui', 'dist');
       const activeDir = fs.existsSync(distDir) ? distDir : publicDir;
+      const activeRoot = path.resolve(activeDir);
       const filePath = path.resolve(activeDir, filename);
 
-      if (filePath.startsWith(path.resolve(activeDir)) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-        const ext = path.extname(filename).toLowerCase();
-        let contentType = 'text/html';
-        if (ext === '.css') contentType = 'text/css';
-        else if (ext === '.js') contentType = 'application/javascript';
-        else if (ext === '.svg') contentType = 'image/svg+xml';
-        else if (ext === '.png') contentType = 'image/png';
-        else if (ext === '.ico') contentType = 'image/x-icon';
+      const MIME: Record<string, string> = {
+        '.html': 'text/html; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.js': 'application/javascript; charset=utf-8',
+        '.mjs': 'application/javascript; charset=utf-8',
+        '.map': 'application/json; charset=utf-8',
+        '.json': 'application/json; charset=utf-8',
+        '.webmanifest': 'application/manifest+json',
+        '.svg': 'image/svg+xml',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.ico': 'image/x-icon',
+        '.woff': 'font/woff',
+        '.woff2': 'font/woff2',
+        '.ttf': 'font/ttf',
+      };
 
-        res.writeHead(200, { 'Content-Type': contentType });
-        res.end(fs.readFileSync(filePath));
-        return;
+      if (filePath.startsWith(activeRoot + path.sep) || filePath === activeRoot) {
+        let servePath: string | null = null;
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          servePath = filePath;
+        } else {
+          // SPA fallback for client-side routes
+          const indexPath = path.join(activeRoot, 'index.html');
+          if (fs.existsSync(indexPath)) servePath = indexPath;
+        }
+        if (servePath) {
+          const ext = path.extname(servePath).toLowerCase();
+          res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+          res.end(fs.readFileSync(servePath));
+          return;
+        }
       }
     }
 
@@ -216,8 +273,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
       }
 
       const file = url.searchParams.get('file');
-      const diffArgs = file ? ['diff', 'HEAD', '--', file] : ['diff', 'HEAD'];
-      const diff = git(diffArgs, repo.path);
+      const diff = getDiff(repo.path, file);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ diff }));
       return;
@@ -933,10 +989,28 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             const lines = output.split('\n').filter((l: string) => l.includes('opencode'));
             sessions = lines.map((line: string) => {
               const parts = line.split(',').map((p: string) => p.replace(/"/g, '').trim());
-              return { name: parts[0], pid: parts[1], memory: parts[4] };
-            });
-            const pids = output.trim().split('\n').filter(Boolean);
-            sessions = pids.map((pid: string) => ({ name: 'opencode', pid: pid.trim(), memory: 'N/A' }));
+              return { name: parts[0] || 'opencode', pid: parts[1] || '', memory: parts[4] || 'N/A' };
+            }).filter((s: any) => s.pid);
+          } else {
+            // Linux/macOS: list opencode PIDs via pgrep, fall back to ps.
+            let output = '';
+            try {
+              output = (await runCommand('pgrep', ['-a', 'opencode'], workspaceDir, { timeoutMs: 10000 })).output;
+            } catch {
+              try {
+                output = (await runCommand('ps', ['-eo', 'pid,args'], workspaceDir, { timeoutMs: 10000 })).output;
+              } catch { output = ''; }
+            }
+            const seen = new Set<string>();
+            for (const line of output.split('\n')) {
+              const m = line.trim().match(/^(\d+)\s+(.*opencode.*)$/);
+              if (m && m[1] && !seen.has(m[1])) {
+                // Skip our own grep/pgrep helper lines
+                if (/pgrep|grep/.test(m[2] || '') && !(m[2] || '').includes('opencode web')) continue;
+                seen.add(m[1]);
+                sessions.push({ name: 'opencode', pid: m[1], memory: 'N/A' });
+              }
+            }
           }
         } catch { /* no sessions */ }
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1112,12 +1186,12 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
     console.log(`\n⚡ an5ORM Workspace Manager Dashboard running at ${url}`);
     console.log(`Press Ctrl+C to terminate the UI server.\n`);
 
-    // Create tunnel if requested
+    // Create tunnel if requested (tunnel must point at the UI port itself)
     if (options?.tunnel) {
       try {
         const { startTunnel } = require('./tunnel');
         await startTunnel({
-          port: PORT + 1,
+          port: PORT,
           subdomain: options.subdomain,
         });
       } catch (err: any) {

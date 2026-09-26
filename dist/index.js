@@ -116,6 +116,8 @@ function parseArgs(argv) {
     let scriptName = '';
     for (let i = 0; i < argv.length; i += 1) {
         const arg = argv[i];
+        if (arg === undefined)
+            continue;
         if (arg === 'tasks') {
             options.command = 'tasks';
             const next = argv[i + 1];
@@ -158,13 +160,13 @@ function parseArgs(argv) {
             options.pull = true;
         }
         else if (arg === '--tag') {
-            options.tag = argv[++i];
+            options.tag = argv[++i] ?? options.tag;
         }
         else if (arg === '--message') {
-            options.message = argv[++i];
+            options.message = argv[++i] ?? options.message;
         }
         else if (arg === '--branch') {
-            options.branch = argv[++i];
+            options.branch = argv[++i] ?? options.branch;
         }
         else if (arg === '--all') {
             options.all = true;
@@ -185,19 +187,19 @@ function parseArgs(argv) {
             options.skipBuild = true;
         }
         else if (arg === '--status') {
-            options.taskStatus = argv[++i];
+            options.taskStatus = argv[++i] ?? options.taskStatus;
         }
         else if (arg === '--priority') {
-            options.taskPriority = argv[++i];
+            options.taskPriority = argv[++i] ?? options.taskPriority;
         }
         else if (arg === '--id') {
-            options.taskId = argv[++i];
+            options.taskId = argv[++i] ?? options.taskId;
         }
         else if (arg === '--subdomain') {
-            options.tunnelSubdomain = argv[++i];
+            options.tunnelSubdomain = argv[++i] ?? options.tunnelSubdomain;
         }
         else if (arg === '--tunnel-port') {
-            options.tunnelPort = parseInt(argv[++i], 10);
+            options.tunnelPort = parseInt(argv[++i] ?? '', 10);
         }
         else if (arg === '--help' || arg === '-h') {
             printHelp();
@@ -235,7 +237,7 @@ function collectChanges(cwd) {
     const files = [];
     for (const line of status.split('\n')) {
         const match = line.match(/^([ MADRCU?!]{1,2})\s+(.*)$/);
-        if (match) {
+        if (match?.[2] !== undefined) {
             files.push(match[2].trim());
         }
     }
@@ -255,7 +257,8 @@ function detectVersion(cwd, tag) {
         const pkg = JSON.parse(fs_1.default.readFileSync(path_1.default.join(cwd, 'package.json'), 'utf8'));
         if (pkg.version) {
             const parts = pkg.version.split('.').map(Number);
-            parts[parts.length - 1] = (parts[parts.length - 1] || 0) + 1;
+            const last = parts.pop() ?? 0;
+            parts.push((last || 0) + 1);
             return parts.join('.');
         }
     }
@@ -266,7 +269,7 @@ function formatCommitMessageForChangelog(commitMessage) {
     const lines = commitMessage.trim().split('\n').map(l => l.trimEnd());
     if (lines.length === 0)
         return '';
-    const subject = lines[0].trim();
+    const subject = (lines[0] ?? '').trim();
     const bodyLines = lines.slice(1).map(l => l.trim());
     const result = [];
     result.push(`- ${subject}`);
@@ -386,16 +389,6 @@ function storeCredentialForRepo(cwd, username, token) {
         });
     }
     catch { /* fall through */ }
-}
-function storeCredential(username, token) {
-    try {
-        const input = `protocol=https\nhost=github.com\nusername=${username}\npassword=${token}\n`;
-        (0, child_process_1.execFileSync)('git', ['credential', 'approve'], { encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] });
-        console.log('  Credential stored in Git Credential Manager.');
-    }
-    catch {
-        console.log('  Note: Could not store credential in GCM. Token may need to be embedded in remote URL.');
-    }
 }
 function ghAuthAvailable() {
     try {
@@ -698,8 +691,10 @@ function getSubmodules(cwd) {
     const paths = [];
     const regex = /path\s*=\s*(\S+)/g;
     let match;
-    while ((match = regex.exec(content)) !== null)
-        paths.push(match[1]);
+    while ((match = regex.exec(content)) !== null) {
+        if (match[1] !== undefined)
+            paths.push(match[1]);
+    }
     return paths.length > 0 ? paths : fs_1.default.readdirSync(cwd).filter(d => !d.startsWith('.') && fs_1.default.existsSync(path_1.default.join(cwd, d, '.git')));
 }
 async function cmdConfig(cwd) {
@@ -826,6 +821,8 @@ async function cmdFormat(targetPath) {
         let modelMetaLines = [];
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
+            if (line === undefined)
+                continue;
             const trimmed = line.trim();
             if (trimmed.startsWith('model ') && trimmed.endsWith('{')) {
                 inModel = true;
@@ -998,9 +995,9 @@ async function main() {
         console.log(`\n🔄 Sync: ${resolvedDir}\n`);
         const results = await (0, impact_1.executeSync)(resolvedDir, {
             dryRun: options.dryRun,
-            skipDocs: options.skipDocs,
-            skipBuild: options.skipBuild,
-            skipPrompt: options.skipPrompt,
+            ...(options.skipDocs !== undefined ? { skipDocs: options.skipDocs } : {}),
+            ...(options.skipBuild !== undefined ? { skipBuild: options.skipBuild } : {}),
+            ...(options.skipPrompt !== undefined ? { skipPrompt: options.skipPrompt } : {}),
         });
         const succeeded = results.filter(r => r.success).length;
         const failed = results.filter(r => !r.success).length;

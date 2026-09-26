@@ -1,5 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { OperationStep } from './OperationStep';
+import {
+  IconSparkles,
+  IconSearch,
+  IconCode,
+  IconFlask,
+  IconHammer,
+  IconX,
+  IconRocket,
+} from './Icons';
 
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL) || '';
 function api(path: string) { return `${API_BASE}${path}`; }
@@ -19,24 +28,25 @@ interface OpencodePanelProps {
 export function OpencodePanel({ workspace, onToast }: OpencodePanelProps) {
   const [sessions, setSessions] = useState<OpencodeSession[]>([]);
   const [starting, setStarting] = useState(false);
+  const [stoppingPid, setStoppingPid] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
   const [showPrompt, setShowPrompt] = useState(false);
 
-  const loadSessions = async () => {
+  const loadSessions = useCallback(async () => {
     try {
       const res = await fetch(api('/api/opencode/sessions'));
       const data = await res.json();
       setSessions(data.sessions || []);
     } catch {
-      // silent
+      // silent — panel stays usable without session list
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadSessions();
-    const t = setInterval(loadSessions, 5000);
+    const t = setInterval(loadSessions, 8000);
     return () => clearInterval(t);
-  }, []);
+  }, [loadSessions]);
 
   const handleStart = async (customPrompt?: string) => {
     setStarting(true);
@@ -66,6 +76,7 @@ export function OpencodePanel({ workspace, onToast }: OpencodePanelProps) {
   };
 
   const handleStop = async (pid: string) => {
+    setStoppingPid(pid);
     try {
       const res = await fetch(api('/api/opencode/stop'), {
         method: 'POST',
@@ -81,37 +92,39 @@ export function OpencodePanel({ workspace, onToast }: OpencodePanelProps) {
       }
     } catch {
       onToast?.('Connection error', 'error');
+    } finally {
+      setStoppingPid(null);
     }
   };
 
   const quickActions = [
-    { label: 'Review Code', prompt: 'Review the code changes in this repository. Look for bugs, security issues, and improvements.' },
-    { label: 'Fix Issues', prompt: 'Find and fix all issues in the codebase. Check for type errors, lint issues, and potential bugs.' },
-    { label: 'Generate Tests', prompt: 'Generate comprehensive tests for the code in this repository.' },
-    { label: 'Refactor', prompt: 'Analyze the codebase and suggest refactoring opportunities to improve code quality.' },
+    { label: 'Review Code', icon: <IconSearch size={12} />, prompt: 'Review the code changes in this repository. Look for bugs, security issues, and improvements.' },
+    { label: 'Fix Issues', icon: <IconCode size={12} />, prompt: 'Find and fix all issues in the codebase. Check for type errors, lint issues, and potential bugs.' },
+    { label: 'Generate Tests', icon: <IconFlask size={12} />, prompt: 'Generate comprehensive tests for the code in this repository.' },
+    { label: 'Refactor', icon: <IconHammer size={12} />, prompt: 'Analyze the codebase and suggest refactoring opportunities to improve code quality.' },
   ];
 
   return (
-    <OperationStep stepNumber={0} title="Opencode" subtitle={sessions.length > 0 ? `${sessions.length} active` : 'AI assistant'} defaultOpen={true} badge={sessions.length > 0 ? String(sessions.length) : undefined}>
+    <OperationStep stepNumber={0} title="Opencode" subtitle={sessions.length > 0 ? `${sessions.length} active session${sessions.length > 1 ? 's' : ''}` : 'AI assistant'} defaultOpen={false} badge={sessions.length > 0 ? String(sessions.length) : undefined}>
       {/* Quick Actions */}
       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '12px' }}>
         {quickActions.map(action => (
           <button
             key={action.label}
-            className="btn btn-secondary"
-            style={{ fontSize: '11px', padding: '6px 12px' }}
+            className="btn btn-secondary btn-sm"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
             onClick={() => handleStart(action.prompt)}
             disabled={starting}
           >
-            🤖 {action.label}
+            {action.icon} {action.label}
           </button>
         ))}
         <button
-          className="btn btn-accent"
-          style={{ fontSize: '11px', padding: '6px 12px' }}
+          className="btn btn-accent btn-sm"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
           onClick={() => setShowPrompt(!showPrompt)}
         >
-          {showPrompt ? '✕ Cancel' : '✏️ Custom'}
+          <IconSparkles size={12} /> {showPrompt ? 'Cancel' : 'Custom'}
         </button>
       </div>
 
@@ -129,12 +142,12 @@ export function OpencodePanel({ workspace, onToast }: OpencodePanelProps) {
             onChange={e => setPrompt(e.target.value)}
           />
           <button
-            className="btn btn-accent"
-            style={{ fontSize: '12px', padding: '6px 16px', marginTop: '8px' }}
+            className={`btn btn-accent btn-sm ${starting ? 'loading' : ''}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px' }}
             onClick={() => handleStart(prompt)}
             disabled={starting || !prompt.trim()}
           >
-            {starting ? '⏳ Starting...' : '🚀 Launch Opencode'}
+            <IconRocket size={12} /> {starting ? 'Starting…' : 'Launch Opencode'}
           </button>
         </div>
       )}
@@ -142,12 +155,12 @@ export function OpencodePanel({ workspace, onToast }: OpencodePanelProps) {
       {/* Start Button (default) */}
       {!showPrompt && (
         <button
-          className="btn btn-accent"
-          style={{ fontSize: '12px', padding: '6px 16px', marginBottom: '12px' }}
+          className={`btn btn-accent btn-sm ${starting ? 'loading' : ''}`}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginBottom: sessions.length > 0 ? '12px' : 0 }}
           onClick={() => handleStart()}
           disabled={starting}
         >
-          {starting ? '⏳ Starting...' : '🤖 Open Opencode'}
+          <IconSparkles size={12} /> {starting ? 'Starting…' : 'Open Opencode'}
         </button>
       )}
 
@@ -163,14 +176,15 @@ export function OpencodePanel({ workspace, onToast }: OpencodePanelProps) {
             }}>
               <span className="spinner" style={{ width: '10px', height: '10px', flexShrink: 0 }} />
               <span style={{ fontSize: '12px', flex: 1 }}>
-                opencode (PID: {s.pid})
+                {s.name || 'opencode'} (PID: {s.pid})
               </span>
               <button
-                className="btn btn-secondary"
-                style={{ fontSize: '10px', padding: '4px 8px' }}
+                className="btn btn-secondary btn-xs"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                 onClick={() => handleStop(s.pid)}
+                disabled={stoppingPid === s.pid}
               >
-                ✕ Stop
+                <IconX size={11} /> {stoppingPid === s.pid ? 'Stopping…' : 'Stop'}
               </button>
             </div>
           ))}

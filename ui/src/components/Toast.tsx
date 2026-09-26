@@ -8,21 +8,31 @@ export interface Toast {
 
 let toastId = 0;
 
+const DURATION: Record<Toast['type'], number> = {
+  success: 3000,
+  info: 3500,
+  error: 5000,
+};
+
 export function useToast() {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
-    const id = ++toastId;
-    setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 3000);
+  const dismissToast = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
-  return { toasts, addToast };
+  const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
+    const id = ++toastId;
+    setToasts(prev => [...prev.slice(-4), { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, DURATION[type]);
+  }, []);
+
+  return { toasts, addToast, dismissToast };
 }
 
-export function ToastContainer({ toasts }: { toasts: Toast[] }) {
+export function ToastContainer({ toasts, onDismiss }: { toasts: Toast[]; onDismiss?: (id: number) => void }) {
   if (toasts.length === 0) return null;
 
   return (
@@ -37,29 +47,32 @@ export function ToastContainer({ toasts }: { toasts: Toast[] }) {
       pointerEvents: 'none',
     }}>
       {toasts.map(toast => (
-        <ToastItem key={toast.id} toast={toast} />
+        <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />
       ))}
     </div>
   );
 }
 
-function ToastItem({ toast }: { toast: Toast }) {
+function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss?: (id: number) => void }) {
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
-    requestAnimationFrame(() => setVisible(true));
-    const t = setTimeout(() => setVisible(false), 2700);
-    return () => clearTimeout(t);
-  }, []);
+    const raf = requestAnimationFrame(() => setVisible(true));
+    const t = setTimeout(() => setVisible(false), DURATION[toast.type] - 300);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t);
+    };
+  }, [toast.type]);
 
-  const bg = toast.type === 'success' ? 'rgba(34,197,94,0.9)' : toast.type === 'error' ? 'rgba(239,68,68,0.9)' : 'rgba(59,130,246,0.9)';
+  const bg = toast.type === 'success' ? 'rgba(16,122,70,0.95)' : toast.type === 'error' ? 'rgba(185,35,35,0.95)' : 'rgba(37,80,160,0.95)';
   const icon = toast.type === 'success' ? '✓' : toast.type === 'error' ? '✕' : 'ℹ';
 
   return (
     <div style={{
       background: bg,
       color: '#fff',
-      padding: '10px 16px',
+      padding: '10px 12px 10px 14px',
       borderRadius: '8px',
       fontSize: '13px',
       fontWeight: 500,
@@ -73,9 +86,27 @@ function ToastItem({ toast }: { toast: Toast }) {
       pointerEvents: 'auto',
       minWidth: '200px',
       maxWidth: '400px',
+      border: '1px solid rgba(255,255,255,0.15)',
     }}>
       <span style={{ fontWeight: 700, fontSize: '14px' }}>{icon}</span>
-      <span>{toast.message}</span>
+      <span style={{ flex: 1 }}>{toast.message}</span>
+      {onDismiss && (
+        <button
+          onClick={() => onDismiss(toast.id)}
+          aria-label="Dismiss notification"
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: 'rgba(255,255,255,0.8)',
+            cursor: 'pointer',
+            fontSize: '14px',
+            lineHeight: 1,
+            padding: '2px 4px',
+          }}
+        >
+          ×
+        </button>
+      )}
     </div>
   );
 }

@@ -162,7 +162,7 @@ export function RepoDashboard({ repo, onToast, onRefreshRepo }: RepoDashboardPro
   };
 
 
-  useEffect(() => { loadTasks(); }, [repo.path]);
+  useEffect(() => { loadTasks(); }, [repo.path]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleCheckoutMain = async () => {
     setCheckoutLoading(true);

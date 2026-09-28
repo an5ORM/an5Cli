@@ -1,13 +1,5 @@
 [
   {
-    "id": "TASK-1783238618691-1",
-    "title": "[LLM Review] Issue: [New commands/flags] [added] [expand CLI].",
-    "description": "[New commands/flags] [added] [expand CLI].",
-    "priority": "medium",
-    "status": "done",
-    "createdAt": "2026-07-05T08:03:38.691Z"
-  },
-  {
     "id": "TASK-1783238618691-2",
     "title": "[LLM Review] Issue: [dist/index.js] [edited] [compiled file]. Fix: edi",
     "description": "[dist/index.js] [edited] [compiled file]. Fix: edit source TS.",

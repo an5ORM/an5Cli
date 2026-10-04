@@ -10,6 +10,8 @@ const path_1 = __importDefault(require("path"));
 const llm_1 = require("./llm");
 const impact_1 = require("./impact");
 const command_1 = require("./command");
+const delivery_1 = require("./delivery");
+const documentation_1 = require("./documentation");
 function loadTasksModule() {
     try {
         return require('an5-tasks');
@@ -53,10 +55,15 @@ Commands:
   --help, -h                 Show this help
 
 Options:
-  --dry-run                  Generate changelog without committing
+  --preview                  Preview changes without modifying files or Git
   --push                     Push commits after creating them
-  --pull                     Pull latest before processing
-  --tag <name>               Create and push a git tag
+  --pull                     Fast-forward pull before processing (never in preview)
+  --tag <name>               Create a release tag matching the package version
+  --version <semver>         Update npm manifest/lockfile (single repo only)
+  --files <path>             Include only this changed path; repeat for more paths
+  --changelog-file <path>    Use prepared Markdown notes instead of an LLM
+  --update-docs              Reconcile docs with code/diff before validation
+  --verify-release           With --tag --push, watch CI and verify GitHub Release
   --message <text>           Override LLM-generated commit message
   --branch <name>            Specify branch (default: main or master detection)
   --all                      Include unchanged repos (status check only)
@@ -84,7 +91,7 @@ Config (.an5cli.json):
   {
     "defaultTarget": "../an5Orm",
     "defaultBranch": "main",
-    "dryRun": false,
+    "preview": false,
     "push": false,
     "skipPrompt": false,
     "tunnel": {
@@ -112,7 +119,7 @@ Examples:
   an5-cli tunnel status                    Show tunnel status`);
 }
 function parseArgs(argv) {
-    const options = { command: 'release', targetDir: process.cwd(), dryRun: false, push: false, pull: false, skipLlm: false, all: false };
+    const options = { command: 'release', targetDir: process.cwd(), preview: false, push: false, pull: false, skipLlm: false, all: false };
     let scriptName = '';
     for (let i = 0; i < argv.length; i += 1) {
         const arg = argv[i];
@@ -150,8 +157,33 @@ function parseArgs(argv) {
             options.command = 'run';
             scriptName = argv[++i] || '';
         }
-        else if (arg === '--dry-run') {
-            options.dryRun = true;
+        else if (arg === '--preview') {
+            options.preview = true;
+        }
+        else if (arg === '--changelog-file') {
+            const value = argv[++i];
+            if (!value || value.startsWith('--'))
+                throw new Error('--changelog-file requires a path');
+            options.changelogFile = path_1.default.resolve(value);
+        }
+        else if (arg === '--update-docs') {
+            options.updateDocs = true;
+        }
+        else if (arg === '--verify-release') {
+            options.verifyRelease = true;
+        }
+        else if (arg === '--version') {
+            const value = argv[++i];
+            if (!value)
+                throw new Error('--version requires a value');
+            (0, delivery_1.validateVersion)(value);
+            options.version = value;
+        }
+        else if (arg === '--files') {
+            const value = argv[++i];
+            if (!value || value.startsWith('--'))
+                throw new Error('--files requires a path');
+            (options.files ?? (options.files = [])).push(value);
         }
         else if (arg === '--push') {
             options.push = true;
@@ -216,7 +248,7 @@ function parseArgs(argv) {
     return options;
 }
 function inferComponent(file) {
-    const normalized = file.replace(/\\/g, '/').toLowerCase();
+    const normalized = '/' + file.replace(/\\/g, '/').toLowerCase();
     if (normalized.includes('/generator/'))
         return 'generator';
     if (normalized.includes('/an5client/'))
@@ -232,15 +264,7 @@ function inferComponent(file) {
     return 'misc';
 }
 function collectChanges(cwd) {
-    git(['-C', cwd, 'update-index', '--refresh'], true);
-    const status = git(['-C', cwd, 'status', '--porcelain']);
-    const files = [];
-    for (const line of status.split('\n')) {
-        const match = line.match(/^([ MADRCU?!]{1,2})\s+(.*)$/);
-        if (match?.[2] !== undefined) {
-            files.push(match[2].trim());
-        }
-    }
+    const files = (0, delivery_1.changedPaths)(cwd);
     const groups = new Map();
     for (const file of files) {
         const component = inferComponent(file);
@@ -256,10 +280,7 @@ function detectVersion(cwd, tag) {
     try {
         const pkg = JSON.parse(fs_1.default.readFileSync(path_1.default.join(cwd, 'package.json'), 'utf8'));
         if (pkg.version) {
-            const parts = pkg.version.split('.').map(Number);
-            const last = parts.pop() ?? 0;
-            parts.push((last || 0) + 1);
-            return parts.join('.');
+            return pkg.version;
         }
     }
     catch { /* fall through */ }
@@ -285,39 +306,32 @@ function formatCommitMessageForChangelog(commitMessage) {
     }
     return result.join('\n');
 }
-function removeVersionSection(content, version) {
-    const lines = content.split('\n');
-    const resultLines = [];
-    let skipping = false;
-    const escVersion = version.replace(/\./g, '\\.');
-    const versionHeaderRegex = new RegExp(`^##\\s+\\[?v?${escVersion}\\]?(?![0-9.])`, 'i');
-    for (const line of lines) {
-        if (versionHeaderRegex.test(line.trim())) {
-            skipping = true;
+function splitVersionSection(content, version) {
+    const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const header = new RegExp(`^##\\s+\\[?v?${escaped}\\]?(?:\\s|$)`, 'i');
+    const body = [], remainder = [];
+    let inSection = false;
+    for (const line of content.split('\n')) {
+        if (header.test(line.trim())) {
+            inSection = true;
             continue;
         }
-        if (skipping) {
-            if (line.trim().startsWith('## ')) {
-                skipping = false;
-            }
-            else {
-                continue;
-            }
-        }
-        resultLines.push(line);
+        if (line.startsWith('## '))
+            inSection = false;
+        (inSection ? body : remainder).push(line);
     }
-    return resultLines.join('\n');
+    return { body: body.join('\n').trim(), remainder: remainder.join('\n').trim() };
 }
-async function generateChangelog(cwd, groups, tag, commitMessage) {
+async function generateChangelog(cwd, groups, tag, commitMessage, diffContent) {
     if (groups.length === 0)
         return '';
-    const version = detectVersion(cwd, tag);
-    const date = new Date().toISOString().slice(0, 10);
+    const version = tag ? detectVersion(cwd, tag) : 'Unreleased';
+    const date = (0, delivery_1.calendarDate)();
     const lines = [];
     // New release header
     lines.push(`## [${version}] - ${date}`, '');
     // Add formatted commit message as changelog content
-    const formattedContent = formatCommitMessageForChangelog(commitMessage);
+    const formattedContent = diffContent || formatCommitMessageForChangelog(commitMessage);
     lines.push(formattedContent);
     lines.push('');
     // Preserve existing changelog
@@ -326,8 +340,10 @@ async function generateChangelog(cwd, groups, tag, commitMessage) {
         const existing = fs_1.default.readFileSync(changelogPath, 'utf8').trim();
         if (existing) {
             const content = existing.replace(/^#\s+Changelog\s*\n*/i, '');
-            const cleanedContent = removeVersionSection(content, version);
-            lines.push(cleanedContent);
+            const previous = splitVersionSection(content, version);
+            if (previous.body)
+                lines.push(previous.body, '');
+            lines.push(previous.remainder);
         }
     }
     const full = lines.join('\n').trim();
@@ -566,17 +582,72 @@ async function releaseRepo(targetDir, options, config) {
     }
     const repoName = getRepoName(resolvedDir);
     const branch = options.branch || config.defaultBranch || detectBranch(resolvedDir);
-    const currentBranch = git(['-C', resolvedDir, 'rev-parse', '--abbrev-ref', 'HEAD'], true);
-    if (currentBranch === 'HEAD' || !currentBranch) {
-        console.log(`  ⚡ [${repoName}] Detached HEAD detected -> switching to branch '${branch}'...`);
-        git(['-C', resolvedDir, 'checkout', branch], true);
+    const currentBranch = git(['-C', resolvedDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
+    if (!options.preview && (currentBranch === 'HEAD' || currentBranch !== branch)) {
+        throw new Error(`Checkout is ${currentBranch}, target is ${branch}; select the intended branch before release`);
     }
-    if (options.pull) {
-        console.log(`  Pulling ${repoName}...`);
-        git(['-C', resolvedDir, 'pull', 'origin', branch], true);
+    if (options.verifyRelease && (!options.tag || !options.push))
+        throw new Error('--verify-release requires --tag and --push');
+    if (options.version)
+        (0, delivery_1.validateVersion)(options.version);
+    if (options.tag) {
+        (0, delivery_1.gitAt)(resolvedDir, ['check-ref-format', `refs/tags/${options.tag}`]);
+        if ((0, delivery_1.gitAt)(resolvedDir, ['tag', '--list', options.tag]))
+            throw new Error(`Tag already exists: ${options.tag}`);
+        if (options.push && (0, delivery_1.gitAt)(resolvedDir, ['ls-remote', 'origin', `refs/tags/${options.tag}`]))
+            throw new Error(`Remote tag already exists: ${options.tag}`);
+        const manifest = path_1.default.join(resolvedDir, 'package.json');
+        if (fs_1.default.existsSync(manifest)) {
+            const version = options.version || JSON.parse(fs_1.default.readFileSync(manifest, 'utf8')).version;
+            if (options.tag !== `v${version}`)
+                throw new Error(`Tag ${options.tag} does not match package version ${version}; use --version explicitly`);
+        }
     }
-    const groups = collectChanges(resolvedDir);
+    if (options.pull && !options.preview)
+        git(['-C', resolvedDir, 'pull', '--ff-only', 'origin', branch]);
+    const selected = options.files?.map(file => {
+        const relative = path_1.default.relative(resolvedDir, path_1.default.resolve(resolvedDir, file));
+        if (!relative || relative.startsWith('..') || path_1.default.isAbsolute(relative))
+            throw new Error(`Invalid selected path: ${file}`);
+        return relative.split(path_1.default.sep).join('/');
+    });
+    if (selected) {
+        const staged = (0, delivery_1.gitAt)(resolvedDir, ['diff', '--cached', '--name-only', '-z']).split('\0').filter(Boolean);
+        if (staged.some(file => !selected.includes(file)))
+            throw new Error('Unrelated staged changes exist; preserve or commit them separately before scoped release');
+    }
+    let groups = collectChanges(resolvedDir);
+    if (selected)
+        groups = groups.map(group => ({ ...group, files: group.files.filter(file => selected.includes(file)) })).filter(group => group.files.length);
+    if (groups.length === 0 && options.version)
+        groups = [{ component: 'build', files: ['package.json'] }];
     if (groups.length === 0) {
+        if (options.tag && !selected) {
+            if (options.preview) {
+                console.log(`  [PREVIEW] Would tag current commit as ${options.tag}`);
+                return true;
+            }
+            if (!(await runQualityChecks(resolvedDir, options)))
+                throw new Error(`Quality checks failed for ${repoName}`);
+            if ((0, delivery_1.changedPaths)(resolvedDir).length)
+                throw new Error('Validation generated changes; review and deliver them before tagging the existing commit');
+            const sha = (0, delivery_1.gitAt)(resolvedDir, ['rev-parse', 'HEAD']);
+            if (options.push) {
+                git(['-C', resolvedDir, 'push', 'origin', `HEAD:refs/heads/${branch}`]);
+                (0, delivery_1.verifyRemote)(resolvedDir, 'origin', `refs/heads/${branch}`, sha);
+            }
+            git(['-C', resolvedDir, 'tag', options.tag, sha]);
+            if (options.push) {
+                git(['-C', resolvedDir, 'push', 'origin', `refs/tags/${options.tag}`]);
+                (0, delivery_1.verifyRemote)(resolvedDir, 'origin', `refs/tags/${options.tag}`, sha);
+                if (options.verifyRelease)
+                    console.log(`  Verified release: ${await (0, delivery_1.verifyRelease)(resolvedDir, options.tag, sha)}`);
+                else
+                    console.log('  Tag pushed; CI/package publication has not been verified');
+            }
+            console.log(`  Tagged ${repoName}: ${sha}`);
+            return true;
+        }
         if (options.all)
             console.log(`  ${repoName}: no changes`);
         return false;
@@ -586,15 +657,39 @@ async function releaseRepo(targetDir, options, config) {
         for (const file of group.files)
             console.log(`    - ${file}`);
     }
-    // 1. Run code quality checks
-    if (!(await runQualityChecks(resolvedDir, options))) {
-        console.error(`❌ Aborting release for ${repoName} due to quality check failures.`);
-        return false;
+    const deliverableFiles = groups.flatMap(group => group.files);
+    const generatedFiles = [];
+    const docUpdates = options.updateDocs && !options.skipDocs ? (0, impact_1.analyzeDocUpdates)(resolvedDir, deliverableFiles) : [];
+    if (selected && !options.preview) {
+        const automaticPaths = ['CHANGELOG.md', ...docUpdates.map(update => update.file), ...(options.version ? ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pyproject.toml'] : [])];
+        const conflicts = (0, delivery_1.changedPaths)(resolvedDir).filter(file => automaticPaths.includes(file) && !selected.includes(file));
+        if (conflicts.length)
+            throw new Error(`Automatic outputs have unrelated edits: ${conflicts.join(', ')}; include them explicitly or preserve them separately`);
     }
-    const fullDiff = git(['-C', resolvedDir, 'diff', 'HEAD'], true);
+    if (!options.preview) {
+        if (options.version)
+            generatedFiles.push(...(0, delivery_1.updateNpmVersion)(resolvedDir, options.version));
+        if (options.updateDocs && !options.skipDocs) {
+            const context = (0, delivery_1.changeContext)(resolvedDir, deliverableFiles);
+            for (const update of docUpdates) {
+                await (0, documentation_1.applyDocUpdate)(resolvedDir, update, context);
+                generatedFiles.push(update.file);
+            }
+        }
+        if (!(await runQualityChecks(resolvedDir, options)))
+            throw new Error(`Quality checks failed for ${repoName}; nothing committed or pushed`);
+    }
+    else {
+        console.log('  [PREVIEW] No builds, documentation writes, version changes, checkout, pull, commit or push');
+        if (options.updateDocs)
+            console.log(`  [PREVIEW] Documentation plan: ${(0, impact_1.analyzeDocUpdates)(resolvedDir, deliverableFiles).map(update => update.file).join(', ')}`);
+        if (options.version)
+            console.log(`  [PREVIEW] Version: ${options.version}`);
+    }
+    const fullDiff = (0, delivery_1.changeContext)(resolvedDir, selected ? [...deliverableFiles, ...generatedFiles] : (0, delivery_1.changedPaths)(resolvedDir));
     // 2. LLM Preview & Review
     const skipPrompt = options.skipPrompt || config.skipPrompt || !process.stdin.isTTY;
-    if (!skipPrompt && fullDiff) {
+    if (!options.preview && !options.skipLlm && !skipPrompt && fullDiff) {
         console.log(`\n🔎 [${repoName}] Requesting LLM Code Review...`);
         const codeReview = await (0, llm_1.generateCodeReview)(fullDiff, repoName);
         if (codeReview) {
@@ -630,7 +725,7 @@ async function releaseRepo(targetDir, options, config) {
         commitMessage = `chore: update ${components}`;
     }
     // 4. Interactive Confirmation & Loop
-    if (!skipPrompt) {
+    if (!options.preview && !skipPrompt) {
         console.log(`\n📝 Proposed commit message:\n"${commitMessage}"\n`);
         let approved = false;
         while (!approved) {
@@ -653,30 +748,51 @@ async function releaseRepo(targetDir, options, config) {
         }
     }
     else {
-        if (!options.dryRun) {
+        if (!options.preview) {
             console.log(`  Commit message: "${commitMessage}"`);
         }
     }
-    // 5. Generate changelog using the resolved commit message
-    const changelog = await generateChangelog(resolvedDir, groups, options.tag, commitMessage);
+    // Generate independent diff-based notes, with a commit-message fallback.
+    const changelogContent = options.changelogFile ? fs_1.default.readFileSync(options.changelogFile, 'utf8').trim() : options.skipLlm ? undefined : (await (0, llm_1.generateChangelogContent)(fullDiff, repoName, deliverableFiles)) || undefined;
+    if (options.changelogFile && !changelogContent)
+        throw new Error('Prepared changelog notes are empty');
+    const changelog = await generateChangelog(resolvedDir, groups, options.tag || (options.version ? `v${options.version}` : undefined), commitMessage, changelogContent);
     const changelogPath = path_1.default.join(resolvedDir, 'CHANGELOG.md');
-    if (options.dryRun) {
-        console.log(`  [DRY RUN] Would commit: "${commitMessage}"`);
-        console.log(`  [DRY RUN] Changelog preview:\n${changelog.slice(0, 800)}`);
+    if (options.preview) {
+        console.log(`  [PREVIEW] Would commit: "${commitMessage}"`);
+        console.log(`  [PREVIEW] Changelog preview:\n${changelog.slice(0, 800)}`);
         return true;
     }
-    fs_1.default.writeFileSync(changelogPath, changelog + '\n');
-    git(['-C', resolvedDir, 'add', '-A']);
-    git(['-C', resolvedDir, 'commit', '-m', commitMessage], true);
-    git(['-C', resolvedDir, 'update-index', '--refresh'], true);
+    fs_1.default.writeFileSync(changelogPath, changelog);
+    const stagePaths = selected ? [...deliverableFiles, ...generatedFiles, 'CHANGELOG.md'] : (0, delivery_1.changedPaths)(resolvedDir);
+    git(['-C', resolvedDir, 'diff', '--check']);
+    const uniqueStagePaths = [...new Set(stagePaths)];
+    const trackedPaths = new Set((0, delivery_1.gitAt)(resolvedDir, ['ls-files', '-z', '--', ...uniqueStagePaths.map(file => `:(literal)${file}`)]).split('\0').filter(Boolean));
+    const tracked = uniqueStagePaths.filter(file => trackedPaths.has(file));
+    const added = uniqueStagePaths.filter(file => !trackedPaths.has(file));
+    // Updating tracked artifacts must work even when their directory is ignored.
+    if (tracked.length)
+        git(['-C', resolvedDir, 'add', '-u', '--', ...tracked.map(file => `:(literal)${file}`)]);
+    if (added.length)
+        git(['-C', resolvedDir, 'add', '--', ...added.map(file => `:(literal)${file}`)]);
+    git(['-C', resolvedDir, 'diff', '--cached', '--check']);
+    git(['-C', resolvedDir, 'commit', '-m', commitMessage]);
+    const sha = (0, delivery_1.gitAt)(resolvedDir, ['rev-parse', 'HEAD']);
     if (options.push) {
-        git(['-C', resolvedDir, 'push', 'origin', branch], true);
-        console.log(`  Pushed ${repoName}/${branch}`);
+        git(['-C', resolvedDir, 'push', 'origin', `HEAD:refs/heads/${branch}`]);
+        (0, delivery_1.verifyRemote)(resolvedDir, 'origin', `refs/heads/${branch}`, sha);
+        console.log(`  Verified push ${repoName}/${branch}: ${sha}`);
     }
     if (options.tag) {
-        git(['-C', resolvedDir, 'tag', options.tag], true);
-        if (options.push)
-            git(['-C', resolvedDir, 'push', 'origin', options.tag], true);
+        git(['-C', resolvedDir, 'tag', options.tag, sha]);
+        if (options.push) {
+            git(['-C', resolvedDir, 'push', 'origin', `refs/tags/${options.tag}`]);
+            (0, delivery_1.verifyRemote)(resolvedDir, 'origin', `refs/tags/${options.tag}`, sha);
+            if (options.verifyRelease)
+                console.log(`  Verified release: ${await (0, delivery_1.verifyRelease)(resolvedDir, options.tag, sha)}`);
+            else
+                console.log('  Tag pushed; CI/package publication has not been verified');
+        }
     }
     console.log(`  ✅ ${repoName}: committed${options.push ? ' + pushed' : ''}`);
     return true;
@@ -962,39 +1078,21 @@ async function main() {
             console.log(`    Action: ${update.action}`);
             console.log(`    Reason: ${update.reason}`);
         }
-        // Execute the updates
-        console.log(`\nUpdating documentation...`);
-        const { improveDocumentation, generateDocumentation } = require('./llm');
+        if (options.preview)
+            return;
+        const context = (0, delivery_1.changeContext)(resolvedDir);
         for (const update of updates) {
-            const filePath = path_1.default.join(path_1.default.dirname(resolvedDir), update.repo, update.file);
-            if (!fs_1.default.existsSync(filePath))
-                continue;
-            const content = fs_1.default.readFileSync(filePath, 'utf8');
-            try {
-                let result = null;
-                if (update.action === 'improve' && content.trim()) {
-                    result = await improveDocumentation(content, path_1.default.basename(filePath));
-                }
-                else if (update.action === 'generate') {
-                    result = await generateDocumentation(content, path_1.default.basename(filePath));
-                }
-                if (result) {
-                    fs_1.default.writeFileSync(filePath, result);
-                    console.log(`  ✓ ${update.repo}/${update.file}`);
-                }
-            }
-            catch (err) {
-                console.error(`  ❌ ${update.repo}/${update.file}: ${err.message}`);
-            }
+            await (0, documentation_1.applyDocUpdate)(resolvedDir, update, context);
+            console.log(`  ✓ ${update.repo}/${update.file}`);
         }
-        console.log(`\n✅ Documentation updates complete.`);
+        console.log('Documentation updates complete.');
         return;
     }
     if (options.command === 'sync') {
         const resolvedDir = path_1.default.resolve(targetDir);
         console.log(`\n🔄 Sync: ${resolvedDir}\n`);
         const results = await (0, impact_1.executeSync)(resolvedDir, {
-            dryRun: options.dryRun,
+            preview: options.preview,
             ...(options.skipDocs !== undefined ? { skipDocs: options.skipDocs } : {}),
             ...(options.skipBuild !== undefined ? { skipBuild: options.skipBuild } : {}),
             ...(options.skipPrompt !== undefined ? { skipPrompt: options.skipPrompt } : {}),
@@ -1002,6 +1100,8 @@ async function main() {
         const succeeded = results.filter(r => r.success).length;
         const failed = results.filter(r => !r.success).length;
         console.log(`\n📊 Sync complete: ${succeeded} succeeded, ${failed} failed`);
+        if (failed)
+            throw new Error(`Sync failed in ${failed} step(s)`);
         return;
     }
     if (options.command === 'tasks') {
@@ -1082,10 +1182,9 @@ async function main() {
     }
     if (options.command === 'ws') {
         console.log(`\n🚀 Workspace release: ${targetDir}\n`);
-        console.log(`  Initializing and updating git submodules...`);
-        git(['-C', targetDir, 'submodule', 'update', '--init', '--recursive'], true);
-        git(['-C', targetDir, 'submodule', 'update', '--remote', '--merge'], true);
-        git(['-C', targetDir, 'submodule', 'foreach', 'git checkout main || true'], true);
+        if (options.tag || options.version || options.files || options.verifyRelease || options.changelogFile)
+            throw new Error('Use single-repository release for --tag, --version, --files, --changelog-file and --verify-release');
+        console.log('  Using current submodule checkouts; no remote update or branch switching');
         const submodules = getSubmodules(targetDir);
         if (submodules.length === 0) {
             console.log('No submodules or git repos found in this directory.');
@@ -1095,6 +1194,8 @@ async function main() {
         for (const sub of submodules) {
             const subPath = path_1.default.join(targetDir, sub);
             console.log(`\n📦 ${sub}`);
+            if (!fs_1.default.existsSync(path_1.default.join(subPath, '.git')))
+                throw new Error(`Submodule ${sub} is not initialized; initialize it explicitly before release`);
             const didChange = await releaseRepo(subPath, { ...options, targetDir: subPath }, config);
             if (didChange)
                 changed++;
@@ -1102,6 +1203,10 @@ async function main() {
         console.log(`\n📊 ${changed}/${submodules.length} repo(s) updated.`);
         const parentGroups = collectChanges(targetDir);
         if (parentGroups.length > 0) {
+            if (options.push && !options.preview) {
+                for (const sub of submodules)
+                    (0, delivery_1.verifySubmoduleCommit)(path_1.default.join(targetDir, sub));
+            }
             console.log(`\n📦 Updating parent repo submodule references...`);
             await releaseRepo(targetDir, options, config);
         }

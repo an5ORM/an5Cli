@@ -2,8 +2,9 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
 import { runNpm } from './command';
+import { changedPaths, changeContext } from './delivery';
+import { applyDocUpdate } from './documentation';
 
 // ─── Dependency Graph ──────────────────────────────────────────────
 // Maps each repo to the repos it EXPORTS to (downstream consumers).
@@ -49,17 +50,8 @@ export interface DocUpdate {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
-function git(args: string[], cwd: string, allowFail = false): string {
-  try {
-    return execFileSync('git', args, { encoding: 'utf8', cwd }).trim();
-  } catch (error: any) {
-    if (allowFail) return error.stdout?.toString()?.trim() || '';
-    throw error;
-  }
-}
-
 function inferComponent(file: string): string {
-  const normalized = file.replace(/\\/g, '/').toLowerCase();
+  const normalized = '/' + file.replace(/\\/g, '/').toLowerCase();
   if (normalized.includes('/generator/')) return 'generator';
   if (normalized.includes('/an5client/')) return 'client';
   if (normalized.includes('/an5schema/')) return 'schema';
@@ -70,19 +62,7 @@ function inferComponent(file: string): string {
 }
 
 function getChangedFiles(repoPath: string): string[] {
-  git(['update-index', '--refresh'], repoPath, true);
-  const status = git(['status', '--porcelain'], repoPath);
-  const files: string[] = [];
-  for (const line of status.split('\n')) {
-    const match = line.match(/^([ MADRCU?!]{1,2})\s+(.*)$/);
-    if (match?.[2] !== undefined) files.push(match[2].trim());
-  }
-  return files;
-}
-
-function getDiffFiles(repoPath: string): string[] {
-  const diff = git(['diff', '--name-only', 'HEAD'], repoPath, true);
-  return diff ? diff.split('\n').filter(Boolean) : [];
+  return changedPaths(repoPath);
 }
 
 // ─── Core Impact Analysis ──────────────────────────────────────────
@@ -90,7 +70,6 @@ export function analyzeImpact(sourceRepoPath: string): ImpactResult {
   const repoName = path.basename(sourceRepoPath);
   const changedFiles = [
     ...getChangedFiles(sourceRepoPath),
-    ...getDiffFiles(sourceRepoPath),
   ];
 
   // Deduplicate
@@ -136,13 +115,12 @@ export function analyzeImpact(sourceRepoPath: string): ImpactResult {
 }
 
 // ─── Diff-Based Documentation Updates ──────────────────────────────
-export function analyzeDocUpdates(repoPath: string): DocUpdate[] {
+export function analyzeDocUpdates(repoPath: string, files?: string[]): DocUpdate[] {
   const repoName = path.basename(repoPath);
   const changedFiles = [
     ...getChangedFiles(repoPath),
-    ...getDiffFiles(repoPath),
   ];
-  const uniqueFiles = [...new Set(changedFiles)];
+  const uniqueFiles = [...new Set(files ?? changedFiles)];
   const updates: DocUpdate[] = [];
 
   for (const file of uniqueFiles) {
@@ -151,6 +129,7 @@ export function analyzeDocUpdates(repoPath: string): DocUpdate[] {
     const dirname = path.dirname(file);
 
     if (ext === '.md') {
+      if (!fs.existsSync(path.join(repoPath, file))) continue;
       // Markdown files — improve existing
       updates.push({
         repo: repoName,
@@ -158,7 +137,7 @@ export function analyzeDocUpdates(repoPath: string): DocUpdate[] {
         action: 'improve',
         reason: 'Documentation file changed',
       });
-    } else if (ext === '.ts' || ext === '.js' || ext === '.py' || ext === '.cs') {
+    } else if (['.ts', '.js', '.mjs', '.cjs', '.py', '.cs', '.go', '.rs', '.an5'].includes(ext)) {
       // Source files — check if docs exist nearby
       const docName = basename.replace(/\.[^.]+$/, '.md');
       const docPath = path.join(repoPath, dirname, docName);
@@ -178,7 +157,7 @@ export function analyzeDocUpdates(repoPath: string): DocUpdate[] {
           action: 'improve',
           reason: `Source ${basename} was modified`,
         });
-      } else {
+      } else if (fs.existsSync(path.join(repoPath, file))) {
         updates.push({
           repo: repoName,
           file: path.join(dirname, docName),
@@ -192,7 +171,7 @@ export function analyzeDocUpdates(repoPath: string): DocUpdate[] {
   // Always check if repo-level docs need updating
   const hasSourceChanges = uniqueFiles.some(f => {
     const ext = path.extname(f).toLowerCase();
-    return ext === '.ts' || ext === '.js' || ext === '.py' || ext === '.cs';
+    return ['.ts', '.js', '.mjs', '.cjs', '.py', '.cs', '.go', '.rs', '.an5'].includes(ext);
   });
 
   if (hasSourceChanges) {
@@ -210,7 +189,7 @@ export function analyzeDocUpdates(repoPath: string): DocUpdate[] {
     }
   }
 
-  return updates;
+  return updates.filter((update, index) => updates.findIndex(other => other.file === update.file) === index);
 }
 
 // ─── Full Sync Plan ────────────────────────────────────────────────
@@ -258,7 +237,7 @@ export interface SyncResult {
 
 export async function executeSync(
   sourceRepoPath: string,
-  options: { dryRun?: boolean; skipDocs?: boolean; skipBuild?: boolean; skipPrompt?: boolean } = {},
+  options: { preview?: boolean; skipDocs?: boolean; skipBuild?: boolean; skipPrompt?: boolean } = {},
 ): Promise<SyncResult[]> {
   const plan = buildSyncPlan(sourceRepoPath);
   const results: SyncResult[] = [];
@@ -279,8 +258,8 @@ export async function executeSync(
     }
   }
 
-  if (options.dryRun) {
-    console.log(`\n[DRY RUN] Would execute ${plan.estimatedSteps} steps`);
+  if (options.preview) {
+    console.log(`\n[PREVIEW] Would execute ${plan.estimatedSteps} steps`);
     console.log(`  Build order: ${plan.buildOrder.join(' → ')}`);
     return results;
   }
@@ -322,32 +301,21 @@ export async function executeSync(
     }
   }
 
+  if (results.some(result => !result.success)) return results;
+
   // 2. Update documentation
   if (!options.skipDocs) {
     console.log(`\n📝 Updating documentation...`);
-    const { generateDocumentation, improveDocumentation } = require('./llm');
+    const context = changeContext(sourceRepoPath);
 
     for (const update of plan.docUpdates) {
-      const filePath = path.join(workspaceDir, update.repo, update.file);
-      if (!fs.existsSync(filePath)) continue;
 
       console.log(`  ${update.action === 'improve' ? '✏️' : '🆕'} ${update.repo}/${update.file}`);
 
       try {
-        const content = fs.readFileSync(filePath, 'utf8');
-        let result: string | null = null;
-
-        if (update.action === 'improve' && content.trim()) {
-          result = await improveDocumentation(content, path.basename(filePath));
-        } else if (update.action === 'generate') {
-          result = await generateDocumentation(content, path.basename(filePath));
-        }
-
-        if (result) {
-          fs.writeFileSync(filePath, result);
-          console.log(`    ✓ Updated`);
-          results.push({ repo: update.repo, step: `doc:${update.file}`, success: true, output: 'Updated' });
-        }
+        await applyDocUpdate(path.join(workspaceDir, update.repo), update, context);
+        console.log(`    ✓ Updated`);
+        results.push({ repo: update.repo, step: `doc:${update.file}`, success: true, output: 'Updated' });
       } catch (err: any) {
         console.error(`    ❌ Failed: ${err.message}`);
         results.push({ repo: update.repo, step: `doc:${update.file}`, success: false, output: err.message });

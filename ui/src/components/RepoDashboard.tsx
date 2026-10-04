@@ -140,6 +140,10 @@ export function RepoDashboard({ repo, onToast, onRefreshRepo }: RepoDashboardPro
   const [commitMsg, setCommitMsg] = useState('');
   const [isMsgGenerating, setIsMsgGenerating] = useState(false);
   const [pushRemote, setPushRemote] = useState(false);
+  const [releaseVersion, setReleaseVersion] = useState('');
+  const [releaseTag, setReleaseTag] = useState('');
+  const [updateReleaseDocs, setUpdateReleaseDocs] = useState(false);
+  const [verifyPublishedRelease, setVerifyPublishedRelease] = useState(false);
   const [releaseLoading, setReleaseLoading] = useState(false);
   const [releaseResult, setReleaseResult] = useState('');
   const [releaseConsole, setReleaseConsole] = useState('');
@@ -353,21 +357,22 @@ export function RepoDashboard({ repo, onToast, onRefreshRepo }: RepoDashboardPro
       return;
     }
     setReleaseLoading(true);
-    setReleaseResult('Publishing release...');
+    setReleaseResult('Running delivery checks...');
     setReleaseConsole('');
     setReleaseSuccess(null);
     try {
       const res = await fetch(api('/api/release'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo: repo.name, message: commitMsg, push: pushRemote }),
+        body: JSON.stringify({ repo: repo.name, message: commitMsg, push: pushRemote, version: releaseVersion || undefined, tag: releaseTag || undefined, updateDocs: updateReleaseDocs, verifyRelease: verifyPublishedRelease }),
       });
       const data = await res.json();
       setReleaseConsole(data.logs || '');
       if (data.success) {
-        setReleaseResult('Release published!');
+        const outcome = data.published ? 'Release and publication verified.' : pushRemote ? 'Committed and pushed. Publication has not been verified.' : 'Changes committed locally.';
+        setReleaseResult(outcome);
         setReleaseSuccess(true);
-        onToast?.('Release published!', 'success');
+        onToast?.(outcome, 'success');
         onRefreshRepo?.();
       } else {
         setReleaseResult('Release failed.');
@@ -630,11 +635,27 @@ export function RepoDashboard({ repo, onToast, onRefreshRepo }: RepoDashboardPro
             </div>
 
             <div className="release-controls">
+              <label>
+                Version (optional)
+                <input aria-label="Release version" value={releaseVersion} onChange={e => setReleaseVersion(e.target.value)} placeholder="1.0.1" disabled={releaseLoading} />
+              </label>
+              <label>
+                Tag (optional)
+                <input aria-label="Release tag" value={releaseTag} onChange={e => setReleaseTag(e.target.value)} placeholder="v1.0.1" disabled={releaseLoading} />
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={updateReleaseDocs} onChange={e => setUpdateReleaseDocs(e.target.checked)} disabled={releaseLoading} />
+                Update documentation from code changes
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={verifyPublishedRelease} onChange={e => setVerifyPublishedRelease(e.target.checked)} disabled={releaseLoading || !pushRemote || !releaseTag} />
+                Verify CI and published release
+              </label>
               <label className="checkbox-label">
                 <input
                   type="checkbox"
                   checked={pushRemote}
-                  onChange={e => setPushRemote(e.target.checked)}
+                  onChange={e => { setPushRemote(e.target.checked); if (!e.target.checked) setVerifyPublishedRelease(false); }}
                 />
                 Push to remote ({repo.branch || 'main'})
               </label>
@@ -642,11 +663,11 @@ export function RepoDashboard({ repo, onToast, onRefreshRepo }: RepoDashboardPro
               <button
                 className={`btn btn-success ${releaseLoading ? 'loading' : ''}`}
                 onClick={handleRelease}
-                disabled={releaseLoading}
+                disabled={releaseLoading || (verifyPublishedRelease && (!pushRemote || !releaseTag))}
                 style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
               >
                 <IconRocket size={14} />
-                {releaseLoading ? 'Publishing...' : 'Commit & Publish Release'}
+                {releaseLoading ? 'Processing...' : verifyPublishedRelease ? 'Commit, Push & Verify Release' : pushRemote ? 'Commit & Push' : 'Commit Changes'}
               </button>
             </div>
 

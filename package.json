@@ -1,6 +1,6 @@
 {
   "name": "an5-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared CLI for changelog generation, release automation, and component-based commits.",
   "license": "MIT",
   "bin": {
@@ -25,7 +25,9 @@
     "pretest": "npm run build",
     "start": "node dist/index.js",
     "tunnel": "node dist/index.js tunnel start",
-    "test": "node test/smoke.test.js"
+    "test": "node test/smoke.test.js && node --test test/delivery.test.js && npm run --silent brand:check",
+    "brand:check": "node scripts/brand-assets.js --check",
+    "brand:sync": "node scripts/brand-assets.js"
   },
   "dependencies": {
     "an5-tasks": "^1.0.0"

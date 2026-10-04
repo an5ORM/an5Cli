@@ -7,6 +7,8 @@ import { exec, execSync, execFileSync, spawn } from 'child_process';
 import { generateCommitMessage, generateCodeReview } from './llm';
 import { analyzeImpact, analyzeDocUpdates, executeSync } from './impact';
 import { runCommand, runNpm } from './command';
+import { applyDocUpdate } from './documentation';
+import { changeContext } from './delivery';
 
 function loadTasksModule() {
   try {
@@ -533,7 +535,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
       req.on('data', chunk => body += chunk);
       req.on('end', async () => {
         try {
-          const { repo: repoName, message, push, noVerify } = JSON.parse(body);
+          const { repo: repoName, message, push, noVerify, version, tag, updateDocs, verifyRelease: verifyPublishedRelease } = JSON.parse(body);
           const repos = getRepositories(workspaceDir);
           const repo = repos.find(r => r.name === repoName);
 
@@ -543,12 +545,15 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             return;
           }
 
-          const isParent = repo.path === workspaceDir;
-          const args = [cliPath, 'release'];
-          if (!isParent) args.push(repo.path);
+          if (typeof message !== 'string' || !message.trim()) throw new Error('A commit message is required');
+          const args = [cliPath, 'release', repo.path];
           args.push('--message', message, '--skip-prompt');
           if (push) args.push('--push');
           if (noVerify) args.push('--no-verify');
+          if (version) { if (typeof version !== 'string') throw new Error('Invalid version'); args.push('--version', version); }
+          if (tag) { if (typeof tag !== 'string') throw new Error('Invalid tag'); args.push('--tag', tag); }
+          if (updateDocs) args.push('--update-docs');
+          if (verifyPublishedRelease) args.push('--verify-release');
 
           let logs = `Executing CLI release:\n> node ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}\n\n`;
           let success = true;
@@ -562,7 +567,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success, logs }));
+          res.end(JSON.stringify({ success, logs, published: success && !!verifyPublishedRelease }));
         } catch (err: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
@@ -623,7 +628,10 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
       req.on('data', chunk => body += chunk);
       req.on('end', async () => {
         try {
-          const { repo: repoName, dryRun, skipDocs, skipBuild } = JSON.parse(body);
+          const payload = JSON.parse(body);
+          const allowedOptions = ['repo', 'preview', 'skipDocs', 'skipBuild'];
+          if (Object.keys(payload).some(key => !allowedOptions.includes(key))) throw new Error('Unknown sync option; use preview to inspect without changes');
+          const { repo: repoName, preview, skipDocs, skipBuild } = payload;
           const repos = getRepositories(workspaceDir);
           const repo = repos.find(r => r.name === repoName);
 
@@ -633,7 +641,7 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             return;
           }
 
-          const results = await executeSync(repo.path, { dryRun, skipDocs, skipBuild, skipPrompt: true });
+          const results = await executeSync(repo.path, { preview, skipDocs, skipBuild, skipPrompt: true });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, results }));
         } catch (err: any) {
@@ -664,25 +672,13 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
           let logs = `Found ${updates.length} documentation update(s)\n\n`;
           let success = true;
 
-          for (const update of updates) {
-            const filePath = path.join(repo.path, update.file);
-            if (!fs.existsSync(filePath)) continue;
+          const context = changeContext(repo.path);
 
+          for (const update of updates) {
             logs += `${update.action === 'improve' ? '✏️' : '🆕'} ${update.repo}/${update.file}\n`;
             try {
-              const content = fs.readFileSync(filePath, 'utf8');
-              let result: string | null = null;
-              if (update.action === 'improve' && content.trim()) {
-                const { improveDocumentation } = require('./llm');
-                result = await improveDocumentation(content, path.basename(filePath));
-              } else if (update.action === 'generate') {
-                const { generateDocumentation } = require('./llm');
-                result = await generateDocumentation(content, path.basename(filePath));
-              }
-              if (result) {
-                fs.writeFileSync(filePath, result);
-                logs += `  ✓ Updated\n`;
-              }
+              await applyDocUpdate(repo.path, update, context);
+              logs += `  ✓ ${update.file} updated\n`;
             } catch (err: any) {
               success = false;
               logs += `  ❌ Failed: ${err.message}\n`;

@@ -18,11 +18,12 @@ console.log('✅ Package structure verified');
 const helpOutput = execSync(`node ${distIndex} --help`, { encoding: 'utf8' });
 assert.ok(helpOutput.includes('an5-cli'), 'Help should mention an5-cli');
 assert.ok(helpOutput.includes('release') || helpOutput.includes('ws'), 'Help should list commands');
+assert.ok(helpOutput.includes('--preview'), 'Help should expose preview mode');
 console.log('✅ CLI help works');
 
-// CLI dry-run on itself (an5Cli repo)
+// CLI preview on itself (an5Cli repo)
 try {
-  const selfDryRun = execSync(`node ${distIndex} release ${root} --dry-run --no-verify --skip-llm`, {
+  const selfPreview = execSync(`node ${distIndex} release ${root} --preview --no-verify --skip-llm`, {
     encoding: 'utf8',
     timeout: 15000,
     env: {
@@ -33,9 +34,9 @@ try {
       GIT_COMMITTER_EMAIL: 'bot@example.com'
     }
   });
-  console.log('✅ CLI dry-run executed on self:', selfDryRun.trim().split('\n')[0] || '(no changes)');
+  console.log('✅ CLI preview executed on self:', selfPreview.trim().split('\n')[0] || '(no changes)');
 } catch (err) {
-  console.log('⚠️ CLI dry-run on self skipped/warning:', err.message);
+  console.log('⚠️ CLI preview on self skipped/warning:', err.message);
 }
 
 // Check LLM module exports

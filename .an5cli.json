@@ -1,6 +1,6 @@
 {
   "defaultTarget": "../mssqlOrm",
   "defaultBranch": "main",
-  "dryRun": false,
+  "preview": false,
   "push": false
 }

@@ -13,7 +13,7 @@ export function runCommand(
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      shell: true,
+      shell: process.platform === 'win32',
       windowsHide: true,
       env: process.env,
       stdio: options.inheritStdio ? 'inherit' : ['ignore', 'pipe', 'pipe'],
@@ -42,7 +42,7 @@ export function runCommand(
         reject(new Error(`Command timed out after ${timeoutMs}ms: ${command} ${args.join(' ')}`));
         return;
       }
-      if (code && code !== 0) {
+      if (code !== 0) {
         const err = new Error(output || `Command failed with exit code ${code}: ${command} ${args.join(' ')}`) as Error & {
           stdout?: string;
           stderr?: string;

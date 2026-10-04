@@ -722,7 +722,8 @@ async function releaseRepo(targetDir: string, options: Options, config: Config):
   const uniqueStagePaths = [...new Set(stagePaths)];
   const trackedPaths = new Set(gitAt(resolvedDir, ['ls-files', '-z', '--', ...uniqueStagePaths.map(file => `:(literal)${file}`)]).split('\0').filter(Boolean));
   const tracked = uniqueStagePaths.filter(file => trackedPaths.has(file));
-  const added = uniqueStagePaths.filter(file => !trackedPaths.has(file));
+  const stagedDeletions = new Set(gitAt(resolvedDir, ['diff', '--cached', '--name-only', '-z', '--diff-filter=D']).split('\0').filter(Boolean));
+  const added = uniqueStagePaths.filter(file => !trackedPaths.has(file) && !(stagedDeletions.has(file) && !fs.existsSync(path.join(resolvedDir, file))));
   // Updating tracked artifacts must work even when their directory is ignored.
   if (tracked.length) git(['-C', resolvedDir, 'add', '-u', '--', ...tracked.map(file => `:(literal)${file}`)]);
   if (added.length) git(['-C', resolvedDir, 'add', '--', ...added.map(file => `:(literal)${file}`)]);

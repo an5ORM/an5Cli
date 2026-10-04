@@ -292,3 +292,13 @@ test('scoped release updates tracked build files inside an ignored directory', a
   assert.equal(git(cwd, 'ls-files', 'dist/untracked.js'), '');
   assert.equal(git(cwd, 'status', '--porcelain'), '');
 });
+
+
+test('scoped release preserves an already staged deletion when resuming delivery', async () => {
+  const cwd = repo(); git(cwd, 'rm', 'code.js');
+  const result = await run(cwd, ['release', cwd, '--files', 'code.js', ...releaseArgs]);
+  assert.equal(result.code, 0, result.output);
+  assert.equal(git(cwd, 'ls-files', 'code.js'), '');
+  assert.equal(git(cwd, 'status', '--porcelain'), '');
+  assert.match(git(cwd, 'show', '--format=', '--name-status', 'HEAD'), /D\s+code.js/);
+});

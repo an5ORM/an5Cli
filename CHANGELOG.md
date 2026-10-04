@@ -2,6 +2,8 @@
 
 ## [0.2.0] - 2026-10-04
 
+- Preserve already staged deletions when resuming a selected-file release after a validation failure.
+
 ### Changed
 - The UI palette now resolves from the `an5Brand` tokens. `--color-primary` was
   `#a855f7` and `--color-accent` was `#06b6d4`, neither of which is an AN5 brand

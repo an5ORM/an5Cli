@@ -37,6 +37,7 @@ Options:
   --version <ver>   Set npm and synchronized static Python versions
   --files <path>    Include an exact changed path; repeat for additional paths
   --changelog-file <path>  Use prepared Markdown notes without an LLM
+  --since <ref>     Override the previous-release commit boundary
   --update-docs     Reconcile docs with current source and Git diff
   --verify-release With --tag --push: verify tag CI and published artifacts
   --message <text>  Override LLM-generated message
@@ -61,7 +62,7 @@ Options:
 Workspace mode uses existing submodule checkouts and pushes children before the
 parent. It does not initialize, merge remote heads, or switch branches. Initialize
 missing submodules explicitly. Per-package `--version`, `--tag`, `--files`,
-`--changelog-file`, and `--verify-release` belong to single-repository release.
+`--changelog-file`, `--since`, and `--verify-release` belong to single-repository release.
 
 ### `doc:diff`, `impact`, and `sync`
 
@@ -105,10 +106,24 @@ version ranges are not guessed or rewritten. Existing version-sync checks still
 run before committing.
 
 Changelog dates use the process timezone; set `TZ` for the intended release date.
-Without an explicit version/tag, notes go into `Unreleased`. Existing notes and
-historical entries are retained. The LLM changelog reads the diff independently
-of the commit message; `--changelog-file` supplies reviewed notes directly, and
-`--skip-llm` falls back to the commit message.
+Without an explicit version/tag, notes go into `Unreleased`. With `--version` or
+`--tag`, the CLI collects commits after the previous release and promotes pending
+notes into the dated version entry. The baseline comes from the last committed
+versioned changelog's matching `v<version>` tag, or the commit that last changed
+that version's notes for untagged workspace packages. Use `--since <ref>` with a
+version/tag to override the baseline; the ref must be an ancestor of `HEAD`.
+Historical entries remain intact. Selected-file releases retain unrelated pending
+notes and promote only matching entries. Repeated entries are deduplicated by
+text, ignoring case, basic formatting, and trailing commit hashes.
+
+Commit messages describe current source changes, including untracked files, rather
+than copying recent commit subjects. Generic LLM responses fall back to observable
+file/API changes; `--message` still overrides generation. Changelog generation is
+separate: the LLM receives release history, committed source changes, pending notes,
+and the current diff. Without an LLM, notes use file/API summaries plus release
+commit subjects and breaking-change details. `--changelog-file` supplies reviewed
+notes in place of automatic generation; pending notes are still promoted during a
+full release. Review generated notes before publishing.
 
 By default release includes the changed paths in that repository. With `--files`,
 unrelated edits remain unstaged; unrelated staged work or dirty automatic output

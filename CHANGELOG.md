@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Collect commits since the previous release for versioned changelogs, with `--since <ref>` to override the boundary.
+
+### Changed
+- Generate commit messages from current source and new files, with specific file/API summaries when an LLM is unavailable or returns generic output.
+- Generate release notes independently of commit messages, retaining breaking-change migration details.
+
+### Fixed
+- Promote `Unreleased` notes into dated releases, deduplicate repeated entries, and preserve unrelated pending notes for selected-file releases.
+- Determine release boundaries from committed changelog history so a prepared next-version header cannot hide unreleased commits.
+
 ## [0.2.0] - 2026-10-04
 
 - Preserve already staged deletions when resuming a selected-file release after a validation failure.

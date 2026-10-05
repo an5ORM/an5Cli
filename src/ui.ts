@@ -8,7 +8,8 @@ import { generateCommitMessage, generateCodeReview } from './llm';
 import { analyzeImpact, analyzeDocUpdates, executeSync } from './impact';
 import { runCommand, runNpm } from './command';
 import { applyDocUpdate } from './documentation';
-import { changeContext } from './delivery';
+import { changeContext, changedPaths } from './delivery';
+import { isSpecificCommitMessage, summarizeChanges } from './release-notes';
 
 function loadTasksModule() {
   try {
@@ -514,10 +515,10 @@ export function startUiServer(workspaceDir: string, options?: { tunnel?: boolean
             return;
           }
 
-          const diff = git(['diff', 'HEAD'], repo.path);
-          const log = git(['log', '--oneline', '-3'], repo.path);
-          const llmContext = `Recent commits:\n${log}\n\nChanges in this commit:\n${diff}`;
-          const message = await generateCommitMessage(llmContext, repoName);
+          const files = changedPaths(repo.path);
+          if (!files.length) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: null, reason: 'No uncommitted changes' })); return; }
+          const candidate = await generateCommitMessage(changeContext(repo.path, files), repoName);
+          const message = candidate && isSpecificCommitMessage(candidate) ? candidate : summarizeChanges(repo.path, files).message;
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: !!message, message }));

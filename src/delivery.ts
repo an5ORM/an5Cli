@@ -3,7 +3,7 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 
 export function gitAt(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim();
+  return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 /** Porcelain -z preserves spaces, quoted paths, and rename destinations. */
@@ -24,10 +24,12 @@ export function changedPaths(cwd: string): string[] {
 }
 
 export function changeContext(cwd: string, files = changedPaths(cwd)): string {
-  const diff = gitAt(cwd, ['diff', 'HEAD', '--', ...files.map(file => `:(literal)${file}`)]);
+  const priority = (file: string) => /(?:^|\/)(?:dist|build|node_modules)\//.test(file) || /lock\.json$/.test(file) ? 4 : /(?:^|\/)(?:test|tests)\//.test(file) ? 2 : /\.(?:md|json)$/.test(file) ? 3 : 1;
+  const ordered = [...files].sort((a, b) => priority(a) - priority(b) || a.localeCompare(b));
+  const diff = ordered.map(file => gitAt(cwd, ['diff', 'HEAD', '--', `:(literal)${file}`]).slice(0, 2400)).filter(Boolean).join('\n').slice(0, 16000);
   const sources: string[] = [];
   let remaining = 24000;
-  for (const file of files) {
+  for (const file of ordered) {
     if (!/\.(ts|js|mjs|cjs|py|cs|go|rs|an5|md)$/i.test(file) || remaining <= 0) continue;
     const fullPath = path.resolve(cwd, file);
     if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile() || fs.lstatSync(fullPath).isSymbolicLink()) continue;

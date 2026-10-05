@@ -12,6 +12,7 @@ const impact_1 = require("./impact");
 const command_1 = require("./command");
 const delivery_1 = require("./delivery");
 const documentation_1 = require("./documentation");
+const release_notes_1 = require("./release-notes");
 function loadTasksModule() {
     try {
         return require('an5-tasks');
@@ -62,6 +63,7 @@ Options:
   --version <semver>         Update npm manifest/lockfile (single repo only)
   --files <path>             Include only this changed path; repeat for more paths
   --changelog-file <path>    Use prepared Markdown notes instead of an LLM
+  --since <ref>              Override the previous-release commit boundary
   --update-docs              Reconcile docs with code/diff before validation
   --verify-release           With --tag --push, watch CI and verify GitHub Release
   --message <text>           Override LLM-generated commit message
@@ -159,6 +161,12 @@ function parseArgs(argv) {
         }
         else if (arg === '--preview') {
             options.preview = true;
+        }
+        else if (arg === '--since') {
+            const value = argv[++i];
+            if (!value || value.startsWith('--'))
+                throw new Error('--since requires a Git reference');
+            options.since = value;
         }
         else if (arg === '--changelog-file') {
             const value = argv[++i];
@@ -273,81 +281,6 @@ function collectChanges(cwd) {
         groups.get(component).files.push(file);
     }
     return Array.from(groups.values());
-}
-function detectVersion(cwd, tag) {
-    if (tag)
-        return tag.replace(/^v/, '');
-    try {
-        const pkg = JSON.parse(fs_1.default.readFileSync(path_1.default.join(cwd, 'package.json'), 'utf8'));
-        if (pkg.version) {
-            return pkg.version;
-        }
-    }
-    catch { /* fall through */ }
-    return '0.0.1';
-}
-function formatCommitMessageForChangelog(commitMessage) {
-    const lines = commitMessage.trim().split('\n').map(l => l.trimEnd());
-    if (lines.length === 0)
-        return '';
-    const subject = (lines[0] ?? '').trim();
-    const bodyLines = lines.slice(1).map(l => l.trim());
-    const result = [];
-    result.push(`- ${subject}`);
-    for (const line of bodyLines) {
-        if (!line)
-            continue;
-        if (line.startsWith('- ') || line.startsWith('* ')) {
-            result.push(`  - ${line.slice(2)}`);
-        }
-        else {
-            result.push(`  - ${line}`);
-        }
-    }
-    return result.join('\n');
-}
-function splitVersionSection(content, version) {
-    const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const header = new RegExp(`^##\\s+\\[?v?${escaped}\\]?(?:\\s|$)`, 'i');
-    const body = [], remainder = [];
-    let inSection = false;
-    for (const line of content.split('\n')) {
-        if (header.test(line.trim())) {
-            inSection = true;
-            continue;
-        }
-        if (line.startsWith('## '))
-            inSection = false;
-        (inSection ? body : remainder).push(line);
-    }
-    return { body: body.join('\n').trim(), remainder: remainder.join('\n').trim() };
-}
-async function generateChangelog(cwd, groups, tag, commitMessage, diffContent) {
-    if (groups.length === 0)
-        return '';
-    const version = tag ? detectVersion(cwd, tag) : 'Unreleased';
-    const date = (0, delivery_1.calendarDate)();
-    const lines = [];
-    // New release header
-    lines.push(`## [${version}] - ${date}`, '');
-    // Add formatted commit message as changelog content
-    const formattedContent = diffContent || formatCommitMessageForChangelog(commitMessage);
-    lines.push(formattedContent);
-    lines.push('');
-    // Preserve existing changelog
-    const changelogPath = path_1.default.join(cwd, 'CHANGELOG.md');
-    if (fs_1.default.existsSync(changelogPath)) {
-        const existing = fs_1.default.readFileSync(changelogPath, 'utf8').trim();
-        if (existing) {
-            const content = existing.replace(/^#\s+Changelog\s*\n*/i, '');
-            const previous = splitVersionSection(content, version);
-            if (previous.body)
-                lines.push(previous.body, '');
-            lines.push(previous.remainder);
-        }
-    }
-    const full = lines.join('\n').trim();
-    return `# Changelog\n\n${full}\n`;
 }
 function detectBranch(cwd) {
     try {
@@ -616,11 +549,19 @@ async function releaseRepo(targetDir, options, config) {
         if (staged.some(file => !selected.includes(file)))
             throw new Error('Unrelated staged changes exist; preserve or commit them separately before scoped release');
     }
+    if (options.since && !options.version && !options.tag)
+        throw new Error('--since requires --version or --tag');
+    const releaseVersion = options.version || options.tag?.replace(/^v/, '');
+    const history = releaseVersion ? (0, release_notes_1.releaseHistory)(resolvedDir, options.since, selected) : undefined;
+    const changelogPath = path_1.default.join(resolvedDir, 'CHANGELOG.md');
+    const existingChangelog = fs_1.default.existsSync(changelogPath) ? fs_1.default.readFileSync(changelogPath, 'utf8') : '';
     let groups = collectChanges(resolvedDir);
     if (selected)
         groups = groups.map(group => ({ ...group, files: group.files.filter(file => selected.includes(file)) })).filter(group => group.files.length);
     if (groups.length === 0 && options.version)
         groups = [{ component: 'build', files: ['package.json'] }];
+    if (groups.length === 0 && options.tag && !selected && ((0, release_notes_1.unreleasedNotes)(existingChangelog) || history?.notes))
+        groups = [{ component: 'docs', files: ['CHANGELOG.md'] }];
     if (groups.length === 0) {
         if (options.tag && !selected) {
             if (options.preview) {
@@ -686,7 +627,11 @@ async function releaseRepo(targetDir, options, config) {
         if (options.version)
             console.log(`  [PREVIEW] Version: ${options.version}`);
     }
-    const fullDiff = (0, delivery_1.changeContext)(resolvedDir, selected ? [...deliverableFiles, ...generatedFiles] : (0, delivery_1.changedPaths)(resolvedDir));
+    const summaryFiles = selected ? [...deliverableFiles, ...generatedFiles] : (0, delivery_1.changedPaths)(resolvedDir);
+    const fullDiff = (0, delivery_1.changeContext)(resolvedDir, summaryFiles);
+    const summary = (0, release_notes_1.summarizeChanges)(resolvedDir, summaryFiles, releaseVersion);
+    if (history)
+        console.log(`  Release history: ${history.commits.length} commit(s) after ${history.baseline?.slice(0, 7) || 'the first commit'}`);
     // 2. LLM Preview & Review
     const skipPrompt = options.skipPrompt || config.skipPrompt || !process.stdin.isTTY;
     if (!options.preview && !options.skipLlm && !skipPrompt && fullDiff) {
@@ -713,16 +658,13 @@ async function releaseRepo(targetDir, options, config) {
     // 3. Resolve commit message (including LLM generation on unstaged diff)
     let commitMessage = options.message;
     if (!commitMessage && !options.skipLlm) {
-        const recentLog = (0, llm_1.getGitLog)(resolvedDir, 3);
-        const llmContext = `Recent commits:\n${recentLog}\n\nChanges in this commit:\n${fullDiff}`;
-        const llmMessage = await (0, llm_1.generateCommitMessage)(llmContext, repoName);
-        if (llmMessage) {
+        const llmMessage = await (0, llm_1.generateCommitMessage)(fullDiff, repoName);
+        if (llmMessage && (0, release_notes_1.isSpecificCommitMessage)(llmMessage)) {
             commitMessage = llmMessage;
         }
     }
     if (!commitMessage) {
-        const components = groups.map(g => g.component).join(', ');
-        commitMessage = `chore: update ${components}`;
+        commitMessage = summary.message;
     }
     // 4. Interactive Confirmation & Loop
     if (!options.preview && !skipPrompt) {
@@ -752,12 +694,15 @@ async function releaseRepo(targetDir, options, config) {
             console.log(`  Commit message: "${commitMessage}"`);
         }
     }
-    // Generate independent diff-based notes, with a commit-message fallback.
-    const changelogContent = options.changelogFile ? fs_1.default.readFileSync(options.changelogFile, 'utf8').trim() : options.skipLlm ? undefined : (await (0, llm_1.generateChangelogContent)(fullDiff, repoName, deliverableFiles)) || undefined;
+    // Release notes cover committed work since the last release and the current diff.
+    const notesContext = history ? `${history.context}\n\nExisting unreleased notes:\n${(0, release_notes_1.unreleasedNotes)(existingChangelog).slice(0, 4000)}\n\nCurrent uncommitted changes:\n${fullDiff.slice(0, 24000)}` : fullDiff;
+    let changelogContent = options.changelogFile ? fs_1.default.readFileSync(options.changelogFile, 'utf8').trim() : undefined;
     if (options.changelogFile && !changelogContent)
         throw new Error('Prepared changelog notes are empty');
-    const changelog = await generateChangelog(resolvedDir, groups, options.tag || (options.version ? `v${options.version}` : undefined), commitMessage, changelogContent);
-    const changelogPath = path_1.default.join(resolvedDir, 'CHANGELOG.md');
+    if (!changelogContent && !options.skipLlm)
+        changelogContent = (await (0, llm_1.generateChangelogContent)(notesContext, repoName, deliverableFiles)) || undefined;
+    const notes = changelogContent && (0, release_notes_1.mergeNotes)(changelogContent) ? (0, release_notes_1.mergeNotes)(changelogContent) : (0, release_notes_1.mergeNotes)(summary.notes, history?.notes || '');
+    const changelog = (0, release_notes_1.renderChangelog)(existingChangelog, notes, releaseVersion, (0, delivery_1.calendarDate)(), !!selected);
     if (options.preview) {
         console.log(`  [PREVIEW] Would commit: "${commitMessage}"`);
         console.log(`  [PREVIEW] Changelog preview:\n${changelog.slice(0, 800)}`);
@@ -1183,7 +1128,7 @@ async function main() {
     }
     if (options.command === 'ws') {
         console.log(`\n🚀 Workspace release: ${targetDir}\n`);
-        if (options.tag || options.version || options.files || options.verifyRelease || options.changelogFile)
+        if (options.tag || options.version || options.files || options.verifyRelease || options.changelogFile || options.since)
             throw new Error('Use single-repository release for --tag, --version, --files, --changelog-file and --verify-release');
         console.log('  Using current submodule checkouts; no remote update or branch switching');
         const submodules = getSubmodules(targetDir);

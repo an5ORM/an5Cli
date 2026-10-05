@@ -73,7 +73,7 @@ test('scoped release preserves unrelated work and existing unreleased notes', as
   assert.match(git(cwd, 'status', '--porcelain'), /unrelated.js/);
   assert.deepEqual(git(cwd, 'show', '--format=', '--name-only', 'HEAD').split('\n').sort(), ['CHANGELOG.md', 'code.js']);
   const log = fs.readFileSync(path.join(cwd, 'CHANGELOG.md'), 'utf8');
-  assert.match(log, /Keep previous note/); assert.match(log, /Historical note/); assert.match(log, /scoped change/);
+  assert.match(log, /Keep previous note/); assert.match(log, /Historical note/); assert.match(log, /value/); assert.doesNotMatch(log, /scoped change/);
   assert.equal((log.match(/## \[Unreleased\]/g) || []).length, 1);
 });
 
@@ -301,4 +301,50 @@ test('scoped release preserves an already staged deletion when resuming delivery
   assert.equal(git(cwd, 'ls-files', 'code.js'), '');
   assert.equal(git(cwd, 'status', '--porcelain'), '');
   assert.match(git(cwd, 'show', '--format=', '--name-status', 'HEAD'), /D\s+code.js/);
+});
+
+
+test('versioned release includes commits after the previous tag and seals Unreleased notes', async () => {
+  const cwd = repo(); git(cwd, 'tag', 'v1.0.0');
+  fs.writeFileSync(path.join(cwd, 'code.js'), 'exports.signIn = true;\n'); git(cwd, 'add', 'code.js'); git(cwd, 'commit', '-m', 'feat(oauth): add Google sign-in');
+  fs.writeFileSync(path.join(cwd, 'code.js'), 'exports.signIn = true; exports.refresh = true;\n'); git(cwd, 'add', 'code.js'); git(cwd, 'commit', '-m', 'fix(oauth): refresh expired access tokens');
+  fs.writeFileSync(path.join(cwd, 'CHANGELOG.md'), '# Changelog\n\n## [Unreleased]\n\n### Added\n- Add Google sign-in.\n\n## [1.0.0] - 2026-10-03\n\n- Original release.\n');
+  const result = await run(cwd, ['release', cwd, '--version', '1.1.0', ...releaseArgs]);
+  assert.equal(result.code, 0, result.output);
+  assert.equal(git(cwd, 'log', '-1', '--format=%s'), 'chore(release): prepare 1.1.0');
+  const log = fs.readFileSync(path.join(cwd, 'CHANGELOG.md'), 'utf8');
+  assert.match(log, /## \[1.1.0\]/); assert.doesNotMatch(log, /Unreleased/);
+  assert.equal((log.match(/Google sign-in/gi) || []).length, 1);
+  assert.match(log, /### Fixed\n- refresh expired access tokens/); assert.match(log, /Original release/);
+});
+
+test('tagging a clean repository seals pending release notes before creating the tag', async () => {
+  const cwd = repo();
+  fs.writeFileSync(path.join(cwd, 'CHANGELOG.md'), '# Changelog\n\n## [Unreleased]\n\n### Fixed\n- Preserve distinct parameters.\n');
+  git(cwd, 'add', 'CHANGELOG.md'); git(cwd, 'commit', '-m', 'docs: record pending notes');
+  const previous = git(cwd, 'rev-parse', 'HEAD');
+  const result = await run(cwd, ['release', cwd, '--tag', 'v1.0.0', ...releaseArgs]);
+  assert.equal(result.code, 0, result.output); assert.notEqual(git(cwd, 'rev-parse', 'HEAD'), previous);
+  assert.equal(git(cwd, 'rev-parse', 'v1.0.0'), git(cwd, 'rev-parse', 'HEAD'));
+  const log = fs.readFileSync(path.join(cwd, 'CHANGELOG.md'), 'utf8');
+  assert.match(log, /## \[1.0.0\]/); assert.doesNotMatch(log, /Unreleased/); assert.match(log, /Preserve distinct parameters/);
+});
+
+test('generic model commit messages fall back to actual source rather than recent commit titles', async () => {
+  const prompts = [];
+  const server = http.createServer((req, res) => { let body = ''; req.on('data', data => body += data); req.on('end', () => {
+    prompts.push(JSON.parse(body).messages[0].content);
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({message:{content:'chore: update code'}}));
+  }); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const cwd = repo(); fs.mkdirSync(path.join(cwd, 'auth'));
+    fs.writeFileSync(path.join(cwd, 'auth/oauth.ts'), 'export function refreshTokens() { return "fresh"; }\n');
+    const result = await run(cwd, ['release', cwd, '--skip-prompt'], {LLM_PROVIDER:'custom',LLM_API_KEY:'fixture',LLM_ENDPOINT:`http://127.0.0.1:${server.address().port}`});
+    assert.equal(result.code, 0, result.output);
+    assert.equal(git(cwd, 'log', '-1', '--format=%s'), 'feat(auth): add refresh tokens');
+    const log = fs.readFileSync(path.join(cwd, 'CHANGELOG.md'), 'utf8');
+    assert.match(log, /refreshTokens/); assert.doesNotMatch(log, /chore: update code/);
+    assert.ok(prompts.some(prompt => prompt.includes('refreshTokens') && prompt.includes('commit message generator')));
+  } finally { await new Promise(resolve => server.close(resolve)); }
 });

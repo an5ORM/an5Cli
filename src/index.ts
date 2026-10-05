@@ -2,11 +2,12 @@
 import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { generateCommitMessage, getGitLog, generateCodeReview, generateChangelogContent } from './llm';
+import { generateCommitMessage, generateCodeReview, generateChangelogContent } from './llm';
 import { analyzeImpact, analyzeDocUpdates, executeSync } from './impact';
 import { runNpm } from './command';
 import { changedPaths, changeContext, gitAt, validateVersion, updateNpmVersion, verifyRemote, verifyRelease, verifySubmoduleCommit, calendarDate } from './delivery';
 import { applyDocUpdate } from './documentation';
+import { isSpecificCommitMessage, mergeNotes, releaseHistory, renderChangelog, summarizeChanges, unreleasedNotes } from './release-notes';
 
 function loadTasksModule() {
   try {
@@ -56,6 +57,7 @@ interface Options {
   noVerify?: boolean;
   updateDocs?: boolean;
   changelogFile?: string;
+  since?: string;
   version?: string;
   files?: string[];
   verifyRelease?: boolean;
@@ -106,6 +108,7 @@ Options:
   --version <semver>         Update npm manifest/lockfile (single repo only)
   --files <path>             Include only this changed path; repeat for more paths
   --changelog-file <path>    Use prepared Markdown notes instead of an LLM
+  --since <ref>              Override the previous-release commit boundary
   --update-docs              Reconcile docs with code/diff before validation
   --verify-release           With --tag --push, watch CI and verify GitHub Release
   --message <text>           Override LLM-generated commit message
@@ -193,6 +196,7 @@ function parseArgs(argv: string[]): Options {
     else if (arg === 'login') { options.command = 'login'; }
     else if (arg === 'run') { options.command = 'run'; scriptName = argv[++i] || ''; }
     else if (arg === '--preview') { options.preview = true; }
+    else if (arg === '--since') { const value = argv[++i]; if (!value || value.startsWith('--')) throw new Error('--since requires a Git reference'); options.since = value; }
     else if (arg === '--changelog-file') { const value = argv[++i]; if (!value || value.startsWith('--')) throw new Error('--changelog-file requires a path'); options.changelogFile = path.resolve(value); }
     else if (arg === '--update-docs') { options.updateDocs = true; }
     else if (arg === '--verify-release') { options.verifyRelease = true; }
@@ -242,78 +246,6 @@ function collectChanges(cwd: string): ChangeGroup[] {
     groups.get(component)!.files.push(file);
   }
   return Array.from(groups.values());
-}
-
-function detectVersion(cwd: string, tag?: string): string {
-  if (tag) return tag.replace(/^v/, '');
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8'));
-    if (pkg.version) {
-      return pkg.version;
-    }
-  } catch { /* fall through */ }
-  return '0.0.1';
-}
-
-function formatCommitMessageForChangelog(commitMessage: string): string {
-  const lines = commitMessage.trim().split('\n').map(l => l.trimEnd());
-  if (lines.length === 0) return '';
-  const subject = (lines[0] ?? '').trim();
-  const bodyLines = lines.slice(1).map(l => l.trim());
-  const result: string[] = [];
-  result.push(`- ${subject}`);
-  for (const line of bodyLines) {
-    if (!line) continue;
-    if (line.startsWith('- ') || line.startsWith('* ')) {
-      result.push(`  - ${line.slice(2)}`);
-    } else {
-      result.push(`  - ${line}`);
-    }
-  }
-  return result.join('\n');
-}
-
-function splitVersionSection(content: string, version: string): { body: string; remainder: string } {
-  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const header = new RegExp(`^##\\s+\\[?v?${escaped}\\]?(?:\\s|$)`, 'i');
-  const body: string[] = [], remainder: string[] = [];
-  let inSection = false;
-  for (const line of content.split('\n')) {
-    if (header.test(line.trim())) { inSection = true; continue; }
-    if (line.startsWith('## ')) inSection = false;
-    (inSection ? body : remainder).push(line);
-  }
-  return { body: body.join('\n').trim(), remainder: remainder.join('\n').trim() };
-}
-
-async function generateChangelog(cwd: string, groups: ChangeGroup[], tag: string | undefined, commitMessage: string, diffContent?: string): Promise<string> {
-  if (groups.length === 0) return '';
-  const version = tag ? detectVersion(cwd, tag) : 'Unreleased';
-  const date = calendarDate();
-  const lines: string[] = [];
-
-  // New release header
-  lines.push(`## [${version}] - ${date}`, '');
-
-  // Add formatted commit message as changelog content
-  const formattedContent = diffContent || formatCommitMessageForChangelog(commitMessage);
-  lines.push(formattedContent);
-  lines.push('');
-
-  // Preserve existing changelog
-  const changelogPath = path.join(cwd, 'CHANGELOG.md');
-  if (fs.existsSync(changelogPath)) {
-    const existing = fs.readFileSync(changelogPath, 'utf8').trim();
-    if (existing) {
-      const content = existing.replace(/^#\s+Changelog\s*\n*/i, '');
-      const previous = splitVersionSection(content, version);
-      if (previous.body) lines.push(previous.body, '');
-      lines.push(previous.remainder);
-    }
-  }
-
-  const full = lines.join('\n').trim();
-  return `# Changelog\n\n${full}\n`;
 }
 
 function detectBranch(cwd: string): string {
@@ -581,9 +513,15 @@ async function releaseRepo(targetDir: string, options: Options, config: Config):
     const staged = gitAt(resolvedDir, ['diff', '--cached', '--name-only', '-z']).split('\0').filter(Boolean);
     if (staged.some(file => !selected.includes(file))) throw new Error('Unrelated staged changes exist; preserve or commit them separately before scoped release');
   }
+  if (options.since && !options.version && !options.tag) throw new Error('--since requires --version or --tag');
+  const releaseVersion = options.version || options.tag?.replace(/^v/, '');
+  const history = releaseVersion ? releaseHistory(resolvedDir, options.since, selected) : undefined;
+  const changelogPath = path.join(resolvedDir, 'CHANGELOG.md');
+  const existingChangelog = fs.existsSync(changelogPath) ? fs.readFileSync(changelogPath, 'utf8') : '';
   let groups = collectChanges(resolvedDir);
   if (selected) groups = groups.map(group => ({ ...group, files: group.files.filter(file => selected.includes(file)) })).filter(group => group.files.length);
   if (groups.length === 0 && options.version) groups = [{ component: 'build', files: ['package.json'] }];
+  if (groups.length === 0 && options.tag && !selected && (unreleasedNotes(existingChangelog) || history?.notes)) groups = [{ component: 'docs', files: ['CHANGELOG.md'] }];
   if (groups.length === 0) {
     if (options.tag && !selected) {
       if (options.preview) { console.log(`  [PREVIEW] Would tag current commit as ${options.tag}`); return true; }
@@ -636,7 +574,10 @@ async function releaseRepo(targetDir: string, options: Options, config: Config):
     if (options.updateDocs) console.log(`  [PREVIEW] Documentation plan: ${analyzeDocUpdates(resolvedDir, deliverableFiles).map(update => update.file).join(', ')}`);
     if (options.version) console.log(`  [PREVIEW] Version: ${options.version}`);
   }
-  const fullDiff = changeContext(resolvedDir, selected ? [...deliverableFiles, ...generatedFiles] : changedPaths(resolvedDir));
+  const summaryFiles = selected ? [...deliverableFiles, ...generatedFiles] : changedPaths(resolvedDir);
+  const fullDiff = changeContext(resolvedDir, summaryFiles);
+  const summary = summarizeChanges(resolvedDir, summaryFiles, releaseVersion);
+  if (history) console.log(`  Release history: ${history.commits.length} commit(s) after ${history.baseline?.slice(0, 7) || 'the first commit'}`);
 
   // 2. LLM Preview & Review
   const skipPrompt = options.skipPrompt || config.skipPrompt || !process.stdin.isTTY;
@@ -664,17 +605,14 @@ async function releaseRepo(targetDir: string, options: Options, config: Config):
   // 3. Resolve commit message (including LLM generation on unstaged diff)
   let commitMessage = options.message;
   if (!commitMessage && !options.skipLlm) {
-    const recentLog = getGitLog(resolvedDir, 3);
-    const llmContext = `Recent commits:\n${recentLog}\n\nChanges in this commit:\n${fullDiff}`;
-    const llmMessage = await generateCommitMessage(llmContext, repoName);
-    if (llmMessage) {
+    const llmMessage = await generateCommitMessage(fullDiff, repoName);
+    if (llmMessage && isSpecificCommitMessage(llmMessage)) {
       commitMessage = llmMessage;
     }
   }
 
   if (!commitMessage) {
-    const components = groups.map(g => g.component).join(', ');
-    commitMessage = `chore: update ${components}`;
+    commitMessage = summary.message;
   }
 
   // 4. Interactive Confirmation & Loop
@@ -703,11 +641,13 @@ async function releaseRepo(targetDir: string, options: Options, config: Config):
     }
   }
 
-  // Generate independent diff-based notes, with a commit-message fallback.
-  const changelogContent = options.changelogFile ? fs.readFileSync(options.changelogFile, 'utf8').trim() : options.skipLlm ? undefined : (await generateChangelogContent(fullDiff, repoName, deliverableFiles)) || undefined;
+  // Release notes cover committed work since the last release and the current diff.
+  const notesContext = history ? `${history.context}\n\nExisting unreleased notes:\n${unreleasedNotes(existingChangelog).slice(0, 4000)}\n\nCurrent uncommitted changes:\n${fullDiff.slice(0, 24000)}` : fullDiff;
+  let changelogContent = options.changelogFile ? fs.readFileSync(options.changelogFile, 'utf8').trim() : undefined;
   if (options.changelogFile && !changelogContent) throw new Error('Prepared changelog notes are empty');
-  const changelog = await generateChangelog(resolvedDir, groups, options.tag || (options.version ? `v${options.version}` : undefined), commitMessage, changelogContent);
-  const changelogPath = path.join(resolvedDir, 'CHANGELOG.md');
+  if (!changelogContent && !options.skipLlm) changelogContent = (await generateChangelogContent(notesContext, repoName, deliverableFiles)) || undefined;
+  const notes = changelogContent && mergeNotes(changelogContent) ? mergeNotes(changelogContent) : mergeNotes(summary.notes, history?.notes || '');
+  const changelog = renderChangelog(existingChangelog, notes, releaseVersion, calendarDate(), !!selected);
 
   if (options.preview) {
     console.log(`  [PREVIEW] Would commit: "${commitMessage}"`);
@@ -1144,7 +1084,7 @@ async function main() {
 
   if (options.command === 'ws') {
     console.log(`\n🚀 Workspace release: ${targetDir}\n`);
-    if (options.tag || options.version || options.files || options.verifyRelease || options.changelogFile) throw new Error('Use single-repository release for --tag, --version, --files, --changelog-file and --verify-release');
+    if (options.tag || options.version || options.files || options.verifyRelease || options.changelogFile || options.since) throw new Error('Use single-repository release for --tag, --version, --files, --changelog-file and --verify-release');
     console.log('  Using current submodule checkouts; no remote update or branch switching');
     const submodules = getSubmodules(targetDir);
     if (submodules.length === 0) {
